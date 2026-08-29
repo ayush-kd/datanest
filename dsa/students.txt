@@ -1,0 +1,9 @@
+302|Priya Mehta|priya302@test.com|ECE|2nd|8.2|Active
+303|Rahul Verma|rahul303@test.com|CSE|3rd|7.8|Active
+304|Neha Singh|neha304@test.com|ECE|2nd|8.4|Active
+305|Karan Patel|karan305@test.com|ME|1st|7.2|Active
+307|Ananya Gupta|ananya307@test.com|CSE|2nd|9.1|Active
+308|Rohan Kumar|rohan308@test.com|IT|3rd|8|Active
+309|Simran Kaur|simran309@test.com|CSE|1st|8.8|Active
+310|Vivek Shah|vivek310@test.com|IT|2nd|7.6|Active
+311|Pooja Nair|pooja311@test.com|ECE|3rd|9|Active
