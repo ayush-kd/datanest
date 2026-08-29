@@ -67,77 +67,30 @@ app.get("/api/health", (req, res) => {
 // RUN C++ DSA ENGINE
 // ==========================================
 
-app.get("/api/students", (req, res) => {
-    execFile(
-        cppEngine,
-        ["list"],
-        {
-            cwd: projectRoot,
-        },
-        async (error, stdout, stderr) => {
+app.get("/api/students", async (req, res) => {
+    try {
+        const students = await studentsCollection
+            .find({})
+            .sort({ rollNo: 1 })
+            .toArray();
 
-            if (error) {
-                console.error(
-                    "C++ Engine Error:",
-                    error
-                );
+        res.json({
+            success: true,
+            count: students.length,
+            students,
+        });
+    } catch (error) {
+        console.error("MongoDB Fetch Error:", error);
 
-                return res.status(500).json({
-                    success: false,
-                    message:
-                        "Failed to retrieve students from C++ engine.",
-                });
-            }
-
-            if (stderr) {
-                console.error(
-                    "C++ Engine stderr:",
-                    stderr
-                );
-            }
-
-            const lines = stdout
-                .trim()
-                .split("\n")
-                .filter(Boolean);
-
-            const students = lines.map(
-                (line) => {
-
-                    const [
-                        rollNo,
-                        name,
-                        email,
-                        department,
-                        year,
-                        cgpa,
-                        status,
-                    ] = line.split("|");
-
-                    return {
-                        rollNo: Number(rollNo),
-                        name,
-                        email,
-                        department,
-                        year,
-                        cgpa: Number(cgpa),
-                        status: status.trim(),
-                    };
-                }
-            );
-
-            res.json({
-                success: true,
-                count: students.length,
-                students,
-            });
-        }
-    );
+        res.status(500).json({
+            success: false,
+            message: "Failed to retrieve students from MongoDB.",
+        });
+    }
 });
 
 
-
-app.post("/api/students", (req, res) => {
+app.post("/api/students", async (req, res) => {
     const {
         rollNo,
         name,
@@ -162,124 +115,88 @@ app.post("/api/students", (req, res) => {
         });
     }
 
-    execFile(
-        cppEngine,
-        [
-            "add",
-            String(rollNo),
+    try {
+        // Check duplicate roll number
+        const existingStudent =
+            await studentsCollection.findOne({
+                rollNo: Number(rollNo),
+            });
+
+        if (existingStudent) {
+            return res.status(409).json({
+                success: false,
+                message:
+                    "A student with this roll number already exists.",
+            });
+        }
+
+        // Save student directly to MongoDB
+        await studentsCollection.insertOne({
+            rollNo: Number(rollNo),
             name,
             email,
             department,
             year,
-            String(cgpa),
-        ],
-        {
-            cwd: projectRoot,
-        },
-        async (error, stdout, stderr) => {
+            cgpa: Number(cgpa),
+            status: "Active",
+        });
 
-            if (error) {
-                console.error(
-                    "C++ Add Error:",
-                    error
-                );
+        return res.status(201).json({
+            success: true,
+            message: "Student added successfully.",
+        });
 
-                const output =
-                    stdout.trim();
+    } catch (error) {
+        console.error("MongoDB Insert Error:", error);
 
-                if (
-                    output ===
-                    "DUPLICATE_ROLL_NO"
-                ) {
-                    return res.status(409).json({
-                        success: false,
-                        message:
-                            "A student with this roll number already exists.",
-                    });
-                }
-
-                return res.status(500).json({
-                    success: false,
-                    message:
-                        "Failed to add student.",
-                    error: output || error.message,
-                });
-            }
-
-            if (stderr) {
-                console.error(
-                    "C++ stderr:",
-                    stderr
-                );
-            }
-
-            if (stdout.trim() === "STUDENT_ADDED") {
-                try {
-                    await studentsCollection.insertOne({
-                        rollNo: Number(rollNo),
-                        name,
-                        email,
-                        department,
-                        year,
-                        cgpa: Number(cgpa),
-                        status: "Active",
-                    });
-
-                    return res.status(201).json({
-                        success: true,
-                        message: "Student added successfully.",
-                    });
-                } catch (mongoError) {
-                    console.error("MongoDB Insert Error:", mongoError);
-
-                    return res.status(500).json({
-                        success: false,
-                        message: "Student added to C++ but MongoDB save failed.",
-                    });
-                }
-            }
-
-            res.status(500).json({
-                success: false,
-                message:
-                    "Unexpected response from C++ engine.",
-                output: stdout,
-            });
-        }
-    );
+        return res.status(500).json({
+            success: false,
+            message: "Failed to add student to MongoDB.",
+        });
+    }
 });
 
 // ==========================================
 // DELETE STUDENT
 // ==========================================
 
-app.delete(
-    "/api/students/:rollNo",
-    (req, res) => {
+app.delete("/api/students/:rollNo", async (req, res) => {
+    const rollNo = Number(req.params.rollNo);
 
-        const rollNo =
-            Number(req.params.rollNo);
+    if (Number.isNaN(rollNo)) {
+        return res.status(400).json({
+            success: false,
+            message: "Invalid roll number.",
+        });
+    }
 
-        if (
-            Number.isNaN(rollNo)
-        ) {
-            return res.status(400).json({
+    try {
+        // MongoDB is the primary database
+        const result = await studentsCollection.deleteOne({
+            rollNo: rollNo,
+        });
+
+        if (result.deletedCount === 0) {
+            return res.status(404).json({
                 success: false,
-                message:
-                    "Invalid roll number.",
+                message: "Student not found.",
             });
         }
 
+        // Update C++ DSA data as well
         execFile(
             cppEngine,
-            [
-                "delete",
-                String(rollNo),
-            ],
+            ["delete", String(rollNo)],
             {
                 cwd: projectRoot,
             },
             (error, stdout, stderr) => {
+                if (error) {
+                    console.error(
+                        "C++ Delete Sync Error:",
+                        error
+                    );
+                }
 
                 if (stderr) {
                     console.error(
@@ -287,107 +204,82 @@ app.delete(
                         stderr
                     );
                 }
-
-                const output =
-                    stdout.trim();
-
-                if (output === "NOT_FOUND") {
-                    return res.status(404).json({
-                        success: false,
-                        message:
-                            "Student not found.",
-                    });
-                }
-
-                if (output === "SAVE_FAILED") {
-                    return res.status(500).json({
-                        success: false,
-                        message:
-                            "Student was deleted from memory but could not be saved.",
-                    });
-                }
-
-                if (error) {
-                    console.error(
-                        "C++ Delete Error:",
-                        error
-                    );
-
-                    return res.status(500).json({
-                        success: false,
-                        message:
-                            "Failed to delete student.",
-                        error:
-                            error.message,
-                    });
-                }
-
-                if (
-                    output ===
-                    "STUDENT_DELETED"
-                ) {
-                    return res.json({
-                        success: true,
-                        message:
-                            "Student deleted successfully.",
-                    });
-                }
-
-                return res.status(500).json({
-                    success: false,
-                    message:
-                        "Unexpected response from C++ engine.",
-                    output,
-                });
             }
         );
-    }
-);
 
+        return res.json({
+            success: true,
+            message: "Student deleted successfully.",
+        });
+
+    } catch (error) {
+        console.error("MongoDB Delete Error:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to delete student.",
+        });
+    }
+});
 
 // ==========================================
 // UPDATE STUDENT
 // ==========================================
 
-app.put(
-    "/api/students/:rollNo",
-    (req, res) => {
+app.put("/api/students/:rollNo", async (req, res) => {
+    const rollNo = Number(req.params.rollNo);
 
-        const rollNo =
-            Number(req.params.rollNo);
+    const {
+        name,
+        email,
+        department,
+        year,
+        cgpa,
+    } = req.body;
 
-        const {
-            name,
-            email,
-            department,
-            year,
-            cgpa,
-        } = req.body;
+    if (Number.isNaN(rollNo)) {
+        return res.status(400).json({
+            success: false,
+            message: "Invalid roll number.",
+        });
+    }
 
-        // Validate roll number
-        if (Number.isNaN(rollNo)) {
-            return res.status(400).json({
+    if (
+        !name ||
+        !email ||
+        !department ||
+        !year ||
+        cgpa === undefined
+    ) {
+        return res.status(400).json({
+            success: false,
+            message: "All student fields are required.",
+        });
+    }
+
+    try {
+        // MongoDB is the primary database
+        const result = await studentsCollection.updateOne(
+            { rollNo: rollNo },
+            {
+                $set: {
+                    name,
+                    email,
+                    department,
+                    year,
+                    cgpa: Number(cgpa),
+                },
+            }
+        );
+
+        if (result.matchedCount === 0) {
+            return res.status(404).json({
                 success: false,
-                message:
-                    "Invalid roll number.",
+                message: "Student not found.",
             });
         }
 
-        // Validate fields
-        if (
-            !name ||
-            !email ||
-            !department ||
-            !year ||
-            cgpa === undefined
-        ) {
-            return res.status(400).json({
-                success: false,
-                message:
-                    "All student fields are required.",
-            });
-        }
-
+        // Update C++ DSA data as well
         execFile(
             cppEngine,
             [
@@ -403,6 +295,12 @@ app.put(
                 cwd: projectRoot,
             },
             (error, stdout, stderr) => {
+                if (error) {
+                    console.error(
+                        "C++ Update Sync Error:",
+                        error
+                    );
+                }
 
                 if (stderr) {
                     console.error(
@@ -410,62 +308,23 @@ app.put(
                         stderr
                     );
                 }
-
-                const output =
-                    stdout.trim();
-
-                if (output === "NOT_FOUND") {
-                    return res.status(404).json({
-                        success: false,
-                        message:
-                            "Student not found.",
-                    });
-                }
-
-                if (output === "SAVE_FAILED") {
-                    return res.status(500).json({
-                        success: false,
-                        message:
-                            "Student was updated but could not be saved.",
-                    });
-                }
-
-                if (error) {
-                    console.error(
-                        "C++ Update Error:",
-                        error
-                    );
-
-                    return res.status(500).json({
-                        success: false,
-                        message:
-                            "Failed to update student.",
-                        error: error.message,
-                    });
-                }
-
-                if (
-                    output ===
-                    "STUDENT_UPDATED"
-                ) {
-                    return res.json({
-                        success: true,
-                        message:
-                            "Student updated successfully.",
-                    });
-                }
-
-                return res.status(500).json({
-                    success: false,
-                    message:
-                        "Unexpected response from C++ engine.",
-                    output,
-                });
             }
         );
-    }
-);
 
+        return res.json({
+            success: true,
+            message: "Student updated successfully.",
+        });
+
+    } catch (error) {
+        console.error("MongoDB Update Error:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to update student.",
+        });
+    }
+});
 // ==========================================
 // LINEAR SEARCH API
 // ==========================================
