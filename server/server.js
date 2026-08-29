@@ -74,7 +74,7 @@ app.get("/api/students", (req, res) => {
         {
             cwd: projectRoot,
         },
-        (error, stdout, stderr) => {
+        async (error, stdout, stderr) => {
 
             if (error) {
                 console.error(
@@ -176,7 +176,7 @@ app.post("/api/students", (req, res) => {
         {
             cwd: projectRoot,
         },
-        (error, stdout, stderr) => {
+        async (error, stdout, stderr) => {
 
             if (error) {
                 console.error(
@@ -213,15 +213,30 @@ app.post("/api/students", (req, res) => {
                 );
             }
 
-            if (
-                stdout.trim() ===
-                "STUDENT_ADDED"
-            ) {
-                return res.status(201).json({
-                    success: true,
-                    message:
-                        "Student added successfully.",
-                });
+            if (stdout.trim() === "STUDENT_ADDED") {
+                try {
+                    await studentsCollection.insertOne({
+                        rollNo: Number(rollNo),
+                        name,
+                        email,
+                        department,
+                        year,
+                        cgpa: Number(cgpa),
+                        status: "Active",
+                    });
+
+                    return res.status(201).json({
+                        success: true,
+                        message: "Student added successfully.",
+                    });
+                } catch (mongoError) {
+                    console.error("MongoDB Insert Error:", mongoError);
+
+                    return res.status(500).json({
+                        success: false,
+                        message: "Student added to C++ but MongoDB save failed.",
+                    });
+                }
             }
 
             res.status(500).json({

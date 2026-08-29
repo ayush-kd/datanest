@@ -7,3 +7,4 @@
 309|Simran Kaur|simran309@test.com|CSE|1st|8.8|Active
 310|Vivek Shah|vivek310@test.com|IT|2nd|7.6|Active
 311|Pooja Nair|pooja311@test.com|ECE|3rd|9|Active
+69|Ayush Dudhe|ayushdudhe@gmail.com|E&TC|3rd|9.7|Active

@@ -1,1 +1,1 @@
-ADD|311|Pooja Nair|pooja311@test.com|ECE|3rd|9|Active
+ADD|69|Ayush Dudhe|ayushdudhe@gmail.com|E&TC|3rd|9.7|Active
