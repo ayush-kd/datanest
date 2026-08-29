@@ -1,3 +1,5 @@
+require("dotenv").config();
+const { MongoClient } = require("mongodb");
 const express = require("express");
 const cors = require("cors");
 const { execFile } = require("child_process");
@@ -6,6 +8,26 @@ const path = require("path");
 const app = express();
 
 const PORT = process.env.PORT || 5000;
+
+const mongoClient = new MongoClient(process.env.MONGO_URI);
+
+let db;
+let studentsCollection;
+
+async function connectMongoDB() {
+    try {
+        await mongoClient.connect();
+
+        db = mongoClient.db("datanest");
+        studentsCollection = db.collection("students");
+
+        console.log("MongoDB connected successfully");
+    } catch (error) {
+        console.error("MongoDB connection failed:", error);
+    }
+}
+
+connectMongoDB();
 
 // ==========================================
 // MIDDLEWARE
