@@ -1,1401 +1,1444 @@
 require("dotenv").config();
-const { MongoClient } = require("mongodb");
+
 const express = require("express");
 const cors = require("cors");
+const { MongoClient } = require("mongodb");
 const { execFile } = require("child_process");
 const path = require("path");
+const fs = require("fs/promises");
 
 const app = express();
 
-const PORT = process.env.PORT || 5000;
+const PORT = Number(process.env.PORT) || 5000;
 
-const mongoClient = new MongoClient(process.env.MONGO_URI);
+const MONGO_URI = process.env.MONGO_URI;
+
+if (!MONGO_URI) {
+    console.error("ERROR: MONGO_URI is missing in .env");
+    process.exit(1);
+}
+
+const mongoClient = new MongoClient(MONGO_URI);
+
+// ======================================================
+// PATHS
+// ======================================================
+
+const projectRoot = path.resolve(__dirname, "..");
+
+const dsaDirectory = path.join(
+    projectRoot,
+    "dsa"
+);
+
+const studentsFile = path.join(
+    dsaDirectory,
+    "students.txt"
+);
+
+const cppExeCandidates = [
+    path.join(dsaDirectory, "student_list.exe"),
+    path.join(dsaDirectory, "student_list"),
+];
+
+let cppEngine = null;
+
+// ======================================================
+// MONGODB
+// ======================================================
 
 let db;
 let studentsCollection;
+let undoCollection;
+let redoCollection;
 
-async function connectMongoDB() {
-    try {
-        await mongoClient.connect();
-
-        db = mongoClient.db("datanest");
-        studentsCollection = db.collection("students");
-
-        console.log("MongoDB connected successfully");
-    } catch (error) {
-        console.error("MongoDB connection failed:", error);
-    }
-}
-
-connectMongoDB();
-
-// ==========================================
-// MIDDLEWARE
-// ==========================================
+// ======================================================
+// EXPRESS
+// ======================================================
 
 app.use(cors());
 app.use(express.json());
 
-// ==========================================
-// C++ DSA ENGINE PATH
-// ==========================================
+// ======================================================
+// DATABASE CONNECTION
+// ======================================================
 
-const cppEngine = path.join(
-    __dirname,
-    "..",
-    "dsa",
-    "student_list"
-);
+async function connectMongoDB() {
+    await mongoClient.connect();
 
-const projectRoot = path.join(
-    __dirname,
-    ".."
-);
+    db = mongoClient.db("datanest");
 
-// ==========================================
-// HEALTH CHECK
-// ==========================================
+    studentsCollection = db.collection("students");
+    undoCollection = db.collection("undo_history");
+    redoCollection = db.collection("redo_history");
 
-app.get("/api/health", (req, res) => {
-    res.json({
-        success: true,
-        message: "DataNest API is running",
+    await studentsCollection.createIndex(
+        { rollNo: 1 },
+        { unique: true }
+    );
+
+    await undoCollection.createIndex({
+        createdAt: 1,
     });
-});
 
-// ==========================================
-// RUN C++ DSA ENGINE
-// ==========================================
+    await redoCollection.createIndex({
+        createdAt: 1,
+    });
 
-app.get("/api/students", async (req, res) => {
-    try {
-        const students = await studentsCollection
-            .find({})
-            .sort({ rollNo: 1 })
-            .toArray();
+    console.log("MongoDB connected successfully.");
+}
 
-        res.json({
-            success: true,
-            count: students.length,
-            students,
-        });
-    } catch (error) {
-        console.error("MongoDB Fetch Error:", error);
+// ======================================================
+// FIND C++ EXECUTABLE
+// ======================================================
 
-        res.status(500).json({
-            success: false,
-            message: "Failed to retrieve students from MongoDB.",
-        });
+async function findCppEngine() {
+    for (const candidate of cppExeCandidates) {
+        try {
+            await fs.access(candidate);
+            cppEngine = candidate;
+
+            console.log(
+                "C++ DSA engine:",
+                cppEngine
+            );
+
+            return;
+        } catch {
+            // Try next candidate
+        }
     }
-});
 
+    throw new Error(
+        "student_list executable not found. " +
+        "Expected dsa/student_list.exe or dsa/student_list."
+    );
+}
 
-app.post("/api/students", async (req, res) => {
-    const {
+// ======================================================
+// ENSURE DSA DIRECTORY
+// ======================================================
+
+async function ensureDsaDirectory() {
+    await fs.mkdir(
+        dsaDirectory,
+        {
+            recursive: true,
+        }
+    );
+}
+
+// ======================================================
+// CONVERT MONGO STUDENT TO C++ FILE LINE
+// ======================================================
+
+function studentToFileLine(student) {
+    const rollNo = Number(student.rollNo) || 0;
+
+    const name = String(
+        student.name || ""
+    );
+
+    const email = String(
+        student.email || ""
+    );
+
+    const department = String(
+        student.department || ""
+    );
+
+    const year = String(
+        student.year || ""
+    );
+
+    const cgpa = Number(
+        student.cgpa || 0
+    );
+
+    const status = String(
+        student.status || "Active"
+    );
+
+    return [
         rollNo,
         name,
         email,
         department,
         year,
         cgpa,
-    } = req.body;
+        status,
+    ].join("|");
+}
 
-    // Validate required fields
-    if (
-        !rollNo ||
-        !name ||
-        !email ||
-        !department ||
-        !year ||
-        cgpa === undefined
-    ) {
-        return res.status(400).json({
-            success: false,
-            message: "All student fields are required.",
-        });
+// ======================================================
+// PARSE C++ FILE LINE
+// ======================================================
+
+function parseStudentLine(line) {
+    const parts = String(line)
+        .split("|");
+
+    if (parts.length < 7) {
+        return null;
     }
 
-    try {
-        // Check duplicate roll number
-        const existingStudent =
-            await studentsCollection.findOne({
-                rollNo: Number(rollNo),
-            });
+    const rollNo = Number(parts[0]);
 
-        if (existingStudent) {
-            return res.status(409).json({
-                success: false,
-                message:
-                    "A student with this roll number already exists.",
-            });
+    if (Number.isNaN(rollNo)) {
+        return null;
+    }
+
+    return {
+        rollNo,
+        name: parts[1] || "",
+        email: parts[2] || "",
+        department: parts[3] || "",
+        year: parts[4] || "",
+        cgpa: Number(parts[5]) || 0,
+        status: parts[6] || "Active",
+    };
+}
+
+// ======================================================
+// MONGO -> students.txt
+//
+// IMPORTANT:
+// MongoDB is the permanent datastore.
+// students.txt is only the bridge for C++.
+// ======================================================
+
+async function syncMongoToCppFile() {
+    await ensureDsaDirectory();
+
+    const students = await studentsCollection
+        .find({})
+        .sort({ rollNo: 1 })
+        .toArray();
+
+    const content = students
+        .map(studentToFileLine)
+        .join("\n");
+
+    await fs.writeFile(
+        studentsFile,
+        content + (content ? "\n" : ""),
+        "utf8"
+    );
+
+    return students;
+}
+
+// ======================================================
+// students.txt -> MONGO
+//
+// C++ writes the final state here.
+// Server reads that state and updates MongoDB.
+// ======================================================
+
+async function syncCppFileToMongo() {
+    let content = "";
+
+    try {
+        content = await fs.readFile(
+            studentsFile,
+            "utf8"
+        );
+    } catch (error) {
+        if (error.code === "ENOENT") {
+            return [];
         }
 
-        // Save student directly to MongoDB
-        await studentsCollection.insertOne({
-            rollNo: Number(rollNo),
+        throw error;
+    }
+
+    const lines = content
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+    const students = lines
+        .map(parseStudentLine)
+        .filter(Boolean);
+
+    // Replace MongoDB student collection
+    // with the state produced by C++.
+
+    await studentsCollection.deleteMany({});
+
+    if (students.length > 0) {
+        await studentsCollection.insertMany(
+            students,
+            {
+                ordered: true,
+            }
+        );
+    }
+
+    return students;
+}
+
+// ======================================================
+// RUN C++ ENGINE
+// ======================================================
+
+function runCpp(
+    args,
+    options = {}
+) {
+    return new Promise(
+        (resolve, reject) => {
+            if (!cppEngine) {
+                reject(
+                    new Error(
+                        "C++ engine is not initialized."
+                    )
+                );
+
+                return;
+            }
+
+            execFile(
+                cppEngine,
+                args.map(String),
+                {
+                    cwd: projectRoot,
+                    windowsHide: true,
+                    maxBuffer:
+                        10 * 1024 * 1024,
+                    ...options,
+                },
+                (
+                    error,
+                    stdout,
+                    stderr
+                ) => {
+                    const output =
+                        String(
+                            stdout || ""
+                        ).trim();
+
+                    const errorOutput =
+                        String(
+                            stderr || ""
+                        ).trim();
+
+                    if (errorOutput) {
+                        console.error(
+                            "C++ STDERR:",
+                            errorOutput
+                        );
+                    }
+
+                    if (
+                        error &&
+                        !output
+                    ) {
+                        reject(
+                            new Error(
+                                error.message +
+                                (
+                                    errorOutput
+                                        ? `: ${errorOutput}`
+                                        : ""
+                                )
+                            )
+                        );
+
+                        return;
+                    }
+
+                    resolve({
+                        output,
+                        stderr: errorOutput,
+                        error,
+                    });
+                }
+            );
+        }
+    );
+}
+
+// ======================================================
+// PARSE NORMAL STUDENT OUTPUT
+// ======================================================
+
+function parseStudentOutput(
+    output
+) {
+    const lines = String(output)
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+    return lines
+        .map(parseStudentLine)
+        .filter(Boolean);
+}
+
+// ======================================================
+// PARSE SEARCH OUTPUT
+// ======================================================
+
+function parseSearchOutput(
+    output,
+    algorithm
+) {
+    const parts = String(output)
+        .trim()
+        .split("|");
+
+    if (
+        parts[0] ===
+        "NOT_FOUND"
+    ) {
+        return {
+            success: true,
+            found: false,
+            comparisons:
+                Number(parts[1]) || 0,
+            algorithm,
+        };
+    }
+
+    if (
+        parts[0] ===
+        "FOUND"
+    ) {
+        return {
+            success: true,
+            found: true,
+
+            student: {
+                rollNo:
+                    Number(parts[1]),
+                name:
+                    parts[2] || "",
+                email:
+                    parts[3] || "",
+                department:
+                    parts[4] || "",
+                year:
+                    parts[5] || "",
+                cgpa:
+                    Number(parts[6]) || 0,
+                status:
+                    parts[7] || "Active",
+            },
+
+            comparisons:
+                Number(parts[8]) || 0,
+
+            algorithm,
+        };
+    }
+
+    throw new Error(
+        "Unexpected search output: " +
+        output
+    );
+}
+
+// ======================================================
+// PARSE SORT OUTPUT
+// ======================================================
+
+function parseSortOutput(
+    output,
+    algorithm,
+    defaultComplexity
+) {
+    const lines = String(output)
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+    const sortedLine =
+        lines.find(
+            (line) =>
+                line.startsWith(
+                    "SORTED|"
+                )
+        );
+
+    if (!sortedLine) {
+        throw new Error(
+            "SORTED output missing from C++."
+        );
+    }
+
+    const sortedParts =
+        sortedLine.split("|");
+
+    const comparisons =
+        Number(
+            sortedParts[1]
+        ) || 0;
+
+    const complexityLine =
+        lines.find(
+            (line) =>
+                line.startsWith(
+                    "COMPLEXITY|"
+                )
+        );
+
+    const students =
+        lines
+            .filter(
+                (line) =>
+                    !line.startsWith(
+                        "SORTED|"
+                    ) &&
+                    !line.startsWith(
+                        "COMPLEXITY|"
+                    )
+            )
+            .map(parseStudentLine)
+            .filter(Boolean);
+
+    return {
+        success: true,
+        algorithm,
+        students,
+        comparisons,
+        timeComplexity:
+            complexityLine
+                ? complexityLine.split("|")[1]
+                : defaultComplexity,
+        spaceComplexity: "O(n)",
+    };
+}
+
+// ======================================================
+// SAVE UNDO RECORD IN MONGO
+//
+// This is history/metadata only.
+// Actual DSA undo is performed by student_list.cpp.
+// ======================================================
+
+async function saveUndoRecord(
+    operation,
+    beforeStudent,
+    afterStudent = null
+) {
+    await undoCollection.insertOne({
+        operation,
+        beforeStudent,
+        afterStudent,
+        createdAt: new Date(),
+    });
+
+    // New operation invalidates redo history.
+    await redoCollection.deleteMany({});
+}
+
+// ======================================================
+// SAVE REDO RECORD
+// ======================================================
+
+async function saveRedoRecord(
+    record
+) {
+    await redoCollection.insertOne({
+        ...record,
+        createdAt: new Date(),
+    });
+}
+
+// ======================================================
+// HEALTH
+// ======================================================
+
+app.get(
+    "/api/health",
+    async (req, res) => {
+        try {
+            res.json({
+                success: true,
+                message:
+                    "DataNest API is running",
+                mongodb: Boolean(db),
+                cppEngine:
+                    cppEngine || "not found",
+                studentsFile,
+            });
+        } catch (error) {
+            res.status(500).json({
+                success: false,
+                message: error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// GET STUDENTS
+//
+// MongoDB is the source for frontend display.
+// ======================================================
+
+app.get(
+    "/api/students",
+    async (req, res) => {
+        try {
+            const students =
+                await studentsCollection
+                    .find({})
+                    .sort({
+                        rollNo: 1,
+                    })
+                    .toArray();
+
+            res.json({
+                success: true,
+                count:
+                    students.length,
+                students,
+            });
+        } catch (error) {
+            console.error(
+                "GET STUDENTS ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Failed to retrieve students.",
+            });
+        }
+    }
+);
+
+// ======================================================
+// ADD STUDENT
+//
+// 1. Mongo data -> students.txt
+// 2. C++ add
+// 3. C++ saves students.txt
+// 4. students.txt -> MongoDB
+// ======================================================
+
+app.post(
+    "/api/students",
+    async (req, res) => {
+        const {
+            rollNo,
             name,
             email,
             department,
             year,
-            cgpa: Number(cgpa),
-            status: "Active",
-        });
+            cgpa,
+        } = req.body;
 
-        return res.status(201).json({
-            success: true,
-            message: "Student added successfully.",
-        });
-
-    } catch (error) {
-        console.error("MongoDB Insert Error:", error);
-
-        return res.status(500).json({
-            success: false,
-            message: "Failed to add student to MongoDB.",
-        });
-    }
-});
-
-// ==========================================
-// DELETE STUDENT
-// ==========================================
-
-app.delete("/api/students/:rollNo", async (req, res) => {
-    const rollNo = Number(req.params.rollNo);
-
-    if (Number.isNaN(rollNo)) {
-        return res.status(400).json({
-            success: false,
-            message: "Invalid roll number.",
-        });
-    }
-
-    try {
-        // MongoDB is the primary database
-        const result = await studentsCollection.deleteOne({
-            rollNo: rollNo,
-        });
-
-        if (result.deletedCount === 0) {
-            return res.status(404).json({
+        if (
+            rollNo === undefined ||
+            rollNo === null ||
+            String(rollNo).trim() === "" ||
+            !name ||
+            !email ||
+            !department ||
+            !year ||
+            cgpa === undefined ||
+            cgpa === null ||
+            String(cgpa).trim() === ""
+        ) {
+            return res.status(400).json({
                 success: false,
-                message: "Student not found.",
+                message:
+                    "All student fields are required.",
             });
         }
 
-        // Update C++ DSA data as well
-        execFile(
-            cppEngine,
-            ["delete", String(rollNo)],
-            {
-                cwd: projectRoot,
-            },
-            (error, stdout, stderr) => {
-                if (error) {
-                    console.error(
-                        "C++ Delete Sync Error:",
-                        error
-                    );
-                }
+        const numericRollNo =
+            Number(rollNo);
 
-                if (stderr) {
-                    console.error(
-                        "C++ Delete stderr:",
-                        stderr
-                    );
-                }
+        const numericCgpa =
+            Number(cgpa);
+
+        if (
+            Number.isNaN(
+                numericRollNo
+            ) ||
+            Number.isNaN(
+                numericCgpa
+            )
+        ) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Roll number and CGPA must be numeric.",
+            });
+        }
+
+        try {
+            const existing =
+                await studentsCollection.findOne(
+                    {
+                        rollNo:
+                            numericRollNo,
+                    }
+                );
+
+            if (existing) {
+                return res.status(409).json({
+                    success: false,
+                    message:
+                        "A student with this roll number already exists.",
+                });
             }
-        );
 
-        return res.json({
-            success: true,
-            message: "Student deleted successfully.",
-        });
+            // Sync real MongoDB state into C++ file.
+            await syncMongoToCppFile();
 
-    } catch (error) {
-        console.error("MongoDB Delete Error:", error);
-
-        return res.status(500).json({
-            success: false,
-            message: "Failed to delete student.",
-        });
-    }
-});
-
-// ==========================================
-// UPDATE STUDENT
-// ==========================================
-
-app.put("/api/students/:rollNo", async (req, res) => {
-    const rollNo = Number(req.params.rollNo);
-
-    const {
-        name,
-        email,
-        department,
-        year,
-        cgpa,
-    } = req.body;
-
-    if (Number.isNaN(rollNo)) {
-        return res.status(400).json({
-            success: false,
-            message: "Invalid roll number.",
-        });
-    }
-
-    if (
-        !name ||
-        !email ||
-        !department ||
-        !year ||
-        cgpa === undefined
-    ) {
-        return res.status(400).json({
-            success: false,
-            message: "All student fields are required.",
-        });
-    }
-
-    try {
-        // MongoDB is the primary database
-        const result = await studentsCollection.updateOne(
-            { rollNo: rollNo },
-            {
-                $set: {
+            const cpp =
+                await runCpp([
+                    "add",
+                    numericRollNo,
                     name,
                     email,
                     department,
                     year,
-                    cgpa: Number(cgpa),
-                },
-            }
-        );
+                    numericCgpa,
+                ]);
 
-        if (result.matchedCount === 0) {
-            return res.status(404).json({
-                success: false,
-                message: "Student not found.",
-            });
-        }
-
-        // Update C++ DSA data as well
-        execFile(
-            cppEngine,
-            [
-                "update",
-                String(rollNo),
-                name,
-                email,
-                department,
-                year,
-                String(cgpa),
-            ],
-            {
-                cwd: projectRoot,
-            },
-            (error, stdout, stderr) => {
-                if (error) {
-                    console.error(
-                        "C++ Update Sync Error:",
-                        error
-                    );
-                }
-
-                if (stderr) {
-                    console.error(
-                        "C++ Update stderr:",
-                        stderr
-                    );
-                }
-            }
-        );
-
-        return res.json({
-            success: true,
-            message: "Student updated successfully.",
-        });
-
-    } catch (error) {
-        console.error("MongoDB Update Error:", error);
-
-        return res.status(500).json({
-            success: false,
-            message: "Failed to update student.",
-        });
-    }
-});
-// ==========================================
-// LINEAR SEARCH API
-// ==========================================
-
-app.get(
-    "/api/search/linear/:rollNo",
-    (req, res) => {
-
-        const rollNo =
-            Number(req.params.rollNo);
-
-        if (Number.isNaN(rollNo)) {
-            return res.status(400).json({
-                success: false,
-                message:
-                    "Invalid roll number.",
-            });
-        }
-
-        execFile(
-            cppEngine,
-            [
-                "linear-search",
-                String(rollNo),
-            ],
-            {
-                cwd: projectRoot,
-            },
-            (error, stdout, stderr) => {
-
-                if (stderr) {
-                    console.error(
-                        "C++ Linear Search stderr:",
-                        stderr
-                    );
-                }
-
-                const output =
-                    stdout.trim();
-
-                if (error && !output) {
-                    console.error(
-                        "C++ Linear Search Error:",
-                        error
-                    );
-
-                    return res.status(500).json({
-                        success: false,
-                        message:
-                            "Linear Search failed.",
-                    });
-                }
-
-                const parts =
-                    output.split("|");
-
-                if (
-                    parts[0] === "NOT_FOUND"
-                ) {
-
-                    return res.json({
-                        success: true,
-                        found: false,
-                        comparisons:
-                            Number(parts[1]),
-                        algorithm:
-                            "Linear Search",
-                        timeComplexity: "O(n)",
-                    });
-                }
-
-                if (
-                    parts[0] === "FOUND"
-                ) {
-
-                    return res.json({
-                        success: true,
-                        found: true,
-
-                        student: {
-                            rollNo:
-                                Number(parts[1]),
-                            name: parts[2],
-                            email: parts[3],
-                            department: parts[4],
-                            year: parts[5],
-                            cgpa:
-                                Number(parts[6]),
-                            status:
-                                parts[7],
-                        },
-
-                        comparisons:
-                            Number(parts[8]),
-
-                        algorithm:
-                            "Linear Search",
-
-                        timeComplexity:
-                            "O(n)",
-                    });
-                }
-
-                return res.status(500).json({
+            if (
+                cpp.output ===
+                "DUPLICATE_ROLL_NO"
+            ) {
+                return res.status(409).json({
                     success: false,
                     message:
-                        "Unexpected response from C++ Linear Search.",
-                    output,
-                });
-            }
-        );
-    }
-);
-
-
-// ==========================================
-// BINARY SEARCH API
-// ==========================================
-
-app.get(
-    "/api/search/binary/:rollNo",
-    (req, res) => {
-
-        const rollNo =
-            Number(req.params.rollNo);
-
-        if (Number.isNaN(rollNo)) {
-            return res.status(400).json({
-                success: false,
-                message:
-                    "Invalid roll number.",
-            });
-        }
-
-        execFile(
-            cppEngine,
-            [
-                "binary-search",
-                String(rollNo),
-            ],
-            {
-                cwd: projectRoot,
-            },
-            (error, stdout, stderr) => {
-
-                if (stderr) {
-                    console.error(
-                        "C++ Binary Search stderr:",
-                        stderr
-                    );
-                }
-
-                const output =
-                    stdout.trim();
-
-                if (error && !output) {
-                    console.error(
-                        "C++ Binary Search Error:",
-                        error
-                    );
-
-                    return res.status(500).json({
-                        success: false,
-                        message:
-                            "Binary Search failed.",
-                    });
-                }
-
-                const parts =
-                    output.split("|");
-
-                if (
-                    parts[0] === "NOT_FOUND"
-                ) {
-
-                    return res.json({
-                        success: true,
-                        found: false,
-                        comparisons:
-                            Number(parts[1]),
-                        algorithm:
-                            "Binary Search",
-                        timeComplexity:
-                            "O(log n)",
-                    });
-                }
-
-                if (
-                    parts[0] === "FOUND"
-                ) {
-
-                    return res.json({
-                        success: true,
-                        found: true,
-
-                        student: {
-                            rollNo:
-                                Number(parts[1]),
-                            name: parts[2],
-                            email: parts[3],
-                            department: parts[4],
-                            year: parts[5],
-                            cgpa:
-                                Number(parts[6]),
-                            status:
-                                parts[7],
-                        },
-
-                        comparisons:
-                            Number(parts[8]),
-
-                        algorithm:
-                            "Binary Search",
-
-                        timeComplexity:
-                            "O(log n)",
-                    });
-                }
-
-                return res.status(500).json({
-                    success: false,
-                    message:
-                        "Unexpected response from C++ Binary Search.",
-                    output,
-                });
-            }
-        );
-    }
-);
-
-// ==========================================
-// DSA LAB - LINEAR SEARCH
-// ==========================================
-
-app.get("/api/dsa-lab/linear-search", (req, res) => {
-    const labLinearSearch = path.join(
-        projectRoot,
-        "dsa",
-        "lab",
-        "searching",
-        "linear_search.exe"
-    );
-
-    execFile(
-        labLinearSearch,
-        [],
-        {
-            cwd: projectRoot,
-        },
-        (error, stdout, stderr) => {
-
-            if (stderr) {
-                console.error(
-                    "DSA Lab Linear Search stderr:",
-                    stderr
-                );
-            }
-
-            const output = String(stdout || "").trim();
-
-            if (error && !output) {
-                console.error(
-                    "DSA Lab Linear Search error:",
-                    error
-                );
-
-                return res.status(500).json({
-                    success: false,
-                    message:
-                        "DSA Lab Linear Search failed.",
-                    error: error.message,
+                        "C++ reports duplicate roll number.",
                 });
             }
 
-            const lines = output
-                .split("\n")
-                .filter(Boolean);
+            if (
+                cpp.output ===
+                "SAVE_FAILED"
+            ) {
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        "C++ could not save students.txt.",
+                });
+            }
 
-            const checks = lines
-                .filter((line) =>
-                    line.startsWith("CHECK|")
+            if (
+                !cpp.output.includes(
+                    "STUDENT_ADDED"
                 )
-                .map((line) => {
-                    const parts = line.split("|");
-
-                    return {
-                        index: Number(parts[1]),
-                        rollNo: Number(parts[2]),
-                        name: parts[3] || "",
-                    };
-                });
-
-            const foundLine = lines.find((line) =>
-                line.startsWith("FOUND|")
-            );
-
-            const comparisonsLine = lines.find((line) =>
-                line.startsWith("COMPARISONS|")
-            );
-
-            const complexityLine = lines.find((line) =>
-                line.startsWith("COMPLEXITY|")
-            );
-
-            let found = null;
-
-            if (foundLine) {
-                const parts = foundLine.split("|");
-
-                found = {
-                    rollNo: Number(parts[1]),
-                    name: parts[2] || "",
-                };
+            ) {
+                throw new Error(
+                    "Unexpected C++ ADD response: " +
+                    cpp.output
+                );
             }
 
-            res.json({
+            // C++ is now authoritative for
+            // the operation result.
+            const syncedStudents =
+                await syncCppFileToMongo();
+
+            const addedStudent =
+                syncedStudents.find(
+                    (student) =>
+                        student.rollNo ===
+                        numericRollNo
+                );
+
+            // Save history in Mongo for UI/history.
+            await saveUndoRecord(
+                "ADD",
+                null,
+                addedStudent
+            );
+
+            res.status(201).json({
                 success: true,
-                algorithm: "Linear Search",
-                checks,
-                found,
-                comparisons: comparisonsLine
-                    ? Number(comparisonsLine.split("|")[1])
-                    : 0,
-                timeComplexity: complexityLine
-                    ? complexityLine.split("|")[1]
-                    : "O(n)",
-            });
-        }
-    );
-});
-
-// ==========================================
-// COMPARE LINEAR AND BINARY SEARCH
-// ==========================================
-
-app.get(
-    "/api/search/compare/:rollNo",
-    (req, res) => {
-
-        const rollNo =
-            Number(req.params.rollNo);
-
-        if (Number.isNaN(rollNo)) {
-            return res.status(400).json({
-                success: false,
                 message:
-                    "Invalid roll number.",
+                    "Student added successfully.",
+                student:
+                    addedStudent || null,
             });
-        }
-
-        const runSearch = (command) => {
-            return new Promise((resolve, reject) => {
-
-                execFile(
-                    cppEngine,
-                    [
-                        command,
-                        String(rollNo),
-                    ],
-                    {
-                        cwd: projectRoot,
-                    },
-                    (error, stdout, stderr) => {
-
-                        if (stderr) {
-                            console.error(
-                                `C++ ${command} stderr:`,
-                                stderr
-                            );
-                        }
-
-                        const output =
-                            stdout.trim();
-
-                        if (error && !output) {
-                            reject(error);
-                            return;
-                        }
-
-                        const parts =
-                            output.split("|");
-
-                        if (
-                            parts[0] ===
-                            "NOT_FOUND"
-                        ) {
-                            resolve({
-                                found: false,
-                                comparisons:
-                                    Number(parts[1]),
-                            });
-
-                            return;
-                        }
-
-                        if (
-                            parts[0] === "FOUND"
-                        ) {
-                            resolve({
-                                found: true,
-
-                                student: {
-                                    rollNo:
-                                        Number(parts[1]),
-                                    name: parts[2],
-                                    email: parts[3],
-                                    department: parts[4],
-                                    year: parts[5],
-                                    cgpa:
-                                        Number(parts[6]),
-                                    status:
-                                        parts[7],
-                                },
-
-                                comparisons:
-                                    Number(parts[8]),
-                            });
-
-                            return;
-                        }
-
-                        reject(
-                            new Error(
-                                `Unexpected C++ response: ${output}`
-                            )
-                        );
-                    }
-                );
-            });
-        };
-
-        Promise.all([
-            runSearch("linear-search"),
-            runSearch("binary-search"),
-        ])
-            .then(
-                ([
-                    linear,
-                    binary,
-                ]) => {
-
-                    res.json({
-                        success: true,
-
-                        rollNo,
-
-                        linearSearch: {
-                            ...linear,
-                            algorithm:
-                                "Linear Search",
-                            timeComplexity:
-                                "O(n)",
-                            spaceComplexity:
-                                "O(1)",
-                        },
-
-                        binarySearch: {
-                            ...binary,
-                            algorithm:
-                                "Binary Search",
-                            timeComplexity:
-                                "O(log n)",
-                            spaceComplexity:
-                                "O(1)",
-                        },
-
-                        comparisonDifference:
-                            Math.abs(
-                                linear.comparisons -
-                                binary.comparisons
-                            ),
-                    });
-                }
-            )
-            .catch((error) => {
-
-                console.error(
-                    "Search comparison error:",
-                    error
-                );
-
-                res.status(500).json({
-                    success: false,
-                    message:
-                        "Unable to compare search algorithms.",
-                });
-            });
-    }
-);
-
-// ==========================================
-// INSERTION SORT API
-// ==========================================
-
-app.get(
-    "/api/sort/insertion",
-    (req, res) => {
-
-        execFile(
-            cppEngine,
-            [
-                "insertion-sort",
-            ],
-            {
-                cwd: projectRoot,
-            },
-            (error, stdout, stderr) => {
-
-                if (stderr) {
-                    console.error(
-                        "C++ Insertion Sort stderr:",
-                        stderr
-                    );
-                }
-
-                const lines =
-                    stdout
-                        .trim()
-                        .split("\n");
-
-                if (
-                    error &&
-                    lines.length === 0
-                ) {
-                    console.error(
-                        "C++ Insertion Sort Error:",
-                        error
-                    );
-
-                    return res.status(500).json({
-                        success: false,
-                        message:
-                            "Insertion Sort failed.",
-                    });
-                }
-
-                if (
-                    !lines[0] ||
-                    !lines[0].startsWith(
-                        "SORTED|"
-                    )
-                ) {
-                    return res.status(500).json({
-                        success: false,
-                        message:
-                            "Unexpected response from C++ Insertion Sort.",
-                        output: stdout,
-                    });
-                }
-
-                const comparisonParts =
-                    lines[0].split("|");
-
-                const comparisons =
-                    Number(
-                        comparisonParts[1]
-                    );
-
-                const complexityLine =
-                    lines.find((line) =>
-                        line.startsWith(
-                            "COMPLEXITY|"
-                        )
-                    );
-
-                const students =
-                    lines
-                        .filter(
-                            (line) =>
-                                line &&
-                                !line.startsWith(
-                                    "SORTED|"
-                                ) &&
-                                !line.startsWith(
-                                    "COMPLEXITY|"
-                                )
-                        )
-                        .map((line) => {
-
-                            const parts =
-                                line.split("|");
-
-                            return {
-                                rollNo:
-                                    Number(parts[0]),
-                                name: parts[1],
-                                email: parts[2],
-                                department:
-                                    parts[3],
-                                year: parts[4],
-                                cgpa:
-                                    Number(parts[5]),
-                                status:
-                                    parts[6],
-                            };
-                        });
-
-                res.json({
-                    success: true,
-
-                    algorithm:
-                        "Insertion Sort",
-
-                    students,
-
-                    comparisons,
-
-                    timeComplexity:
-                        complexityLine
-                            ? complexityLine.split("|")[1]
-                            : "O(n^2)",
-
-                    spaceComplexity:
-                        "O(n)",
-                });
-            }
-        );
-    }
-);
-
-// ==========================================
-// MERGE SORT API
-// ==========================================
-
-app.get(
-    "/api/sort/merge",
-    (req, res) => {
-
-        execFile(
-            cppEngine,
-            [
-                "merge-sort",
-            ],
-            {
-                cwd: projectRoot,
-            },
-            (error, stdout, stderr) => {
-
-                if (stderr) {
-                    console.error(
-                        "C++ Merge Sort stderr:",
-                        stderr
-                    );
-                }
-
-                const output =
-                    stdout.trim();
-
-                if (error && !output) {
-                    console.error(
-                        "C++ Merge Sort Error:",
-                        error
-                    );
-
-                    return res.status(500).json({
-                        success: false,
-                        message:
-                            "Merge Sort failed.",
-                    });
-                }
-
-                const lines =
-                    output.split("\n");
-
-                if (
-                    !lines[0] ||
-                    !lines[0].startsWith(
-                        "SORTED|"
-                    )
-                ) {
-                    return res.status(500).json({
-                        success: false,
-                        message:
-                            "Unexpected response from C++ Merge Sort.",
-                        output,
-                    });
-                }
-
-                const comparisonParts =
-                    lines[0].split("|");
-
-                const comparisons =
-                    Number(
-                        comparisonParts[1]
-                    );
-
-                const complexityLine =
-                    lines.find((line) =>
-                        line.startsWith(
-                            "COMPLEXITY|"
-                        )
-                    );
-
-                const students =
-                    lines
-                        .filter(
-                            (line) =>
-                                line &&
-                                !line.startsWith(
-                                    "SORTED|"
-                                ) &&
-                                !line.startsWith(
-                                    "COMPLEXITY|"
-                                )
-                        )
-                        .map((line) => {
-
-                            const parts =
-                                line.split("|");
-
-                            return {
-                                rollNo:
-                                    Number(parts[0]),
-                                name: parts[1],
-                                email: parts[2],
-                                department:
-                                    parts[3],
-                                year: parts[4],
-                                cgpa:
-                                    Number(parts[5]),
-                                status:
-                                    parts[6],
-                            };
-                        });
-
-                res.json({
-                    success: true,
-
-                    algorithm:
-                        "Merge Sort",
-
-                    students,
-
-                    comparisons,
-
-                    timeComplexity:
-                        complexityLine
-                            ? complexityLine.split("|")[1]
-                            : "O(n log n)",
-
-                    spaceComplexity:
-                        "O(n)",
-                });
-            }
-        );
-    }
-);
-
-// ==========================================
-// COMPARE INSERTION AND MERGE SORT
-// ==========================================
-
-app.get(
-    "/api/sort/compare",
-    (req, res) => {
-
-        const runSort = (command) => {
-            return new Promise((resolve, reject) => {
-
-                execFile(
-                    cppEngine,
-                    [command],
-                    {
-                        cwd: projectRoot,
-                    },
-                    (error, stdout, stderr) => {
-
-                        if (stderr) {
-                            console.error(
-                                `C++ ${command} stderr:`,
-                                stderr
-                            );
-                        }
-
-                        const output =
-                            stdout.trim();
-
-                        if (error && !output) {
-                            reject(error);
-                            return;
-                        }
-
-                        const lines =
-                            output.split("\n");
-
-                        if (
-                            !lines[0] ||
-                            !lines[0].startsWith(
-                                "SORTED|"
-                            )
-                        ) {
-                            reject(
-                                new Error(
-                                    `Unexpected ${command} response.`
-                                )
-                            );
-
-                            return;
-                        }
-
-                        const comparisonParts =
-                            lines[0].split("|");
-
-                        const comparisons =
-                            Number(
-                                comparisonParts[1]
-                            );
-
-                        const complexityLine =
-                            lines.find((line) =>
-                                line.startsWith(
-                                    "COMPLEXITY|"
-                                )
-                            );
-
-                        const students =
-                            lines
-                                .filter(
-                                    (line) =>
-                                        line &&
-                                        !line.startsWith(
-                                            "SORTED|"
-                                        ) &&
-                                        !line.startsWith(
-                                            "COMPLEXITY|"
-                                        )
-                                )
-                                .map((line) => {
-
-                                    const parts =
-                                        line.split("|");
-
-                                    return {
-                                        rollNo:
-                                            Number(parts[0]),
-                                        name: parts[1],
-                                        email: parts[2],
-                                        department:
-                                            parts[3],
-                                        year: parts[4],
-                                        cgpa:
-                                            Number(parts[5]),
-                                        status:
-                                            parts[6],
-                                    };
-                                });
-
-                        resolve({
-                            students,
-                            comparisons,
-
-                            timeComplexity:
-                                complexityLine
-                                    ? complexityLine.split("|")[1]
-                                    : "",
-
-                            spaceComplexity:
-                                "O(n)",
-                        });
-                    }
-                );
-            });
-        };
-
-        Promise.all([
-            runSort("insertion-sort"),
-            runSort("merge-sort"),
-        ])
-            .then(
-                ([
-                    insertion,
-                    merge,
-                ]) => {
-
-                    res.json({
-                        success: true,
-
-                        insertionSort: {
-                            algorithm:
-                                "Insertion Sort",
-
-                            ...insertion,
-                        },
-
-                        mergeSort: {
-                            algorithm:
-                                "Merge Sort",
-
-                            ...merge,
-                        },
-
-                        comparisonDifference:
-                            Math.abs(
-                                insertion.comparisons -
-                                merge.comparisons
-                            ),
-                    });
-                }
-            )
-            .catch((error) => {
-
-                console.error(
-                    "Sort comparison error:",
-                    error
-                );
-
-                res.status(500).json({
-                    success: false,
-                    message:
-                        "Unable to compare sorting algorithms.",
-                });
-            });
-    }
-);
-
-
-// ==========================================
-// STACK / UNDO API
-// ==========================================
-
-app.get(
-    "/api/stack/test",
-    (req, res) => {
-
-        execFile(
-            cppEngine,
-            ["stack-test"],
-            {
-                cwd: projectRoot,
-            },
-            (error, stdout, stderr) => {
-
-                if (stderr) {
-                    console.error(
-                        "C++ Stack stderr:",
-                        stderr
-                    );
-                }
-
-                const lines =
-                    stdout.trim().split("\n");
-
-                if (error) {
-                    console.error(
-                        "C++ Stack error:",
-                        error
-                    );
-
-                    return res.status(500).json({
-                        success: false,
-                        message:
-                            "Stack operation failed.",
-                    });
-                }
-
-                const pushed =
-                    lines.find(
-                        (line) =>
-                            line.startsWith("PUSHED|")
-                    );
-
-                const undo =
-                    lines.find(
-                        (line) =>
-                            line.startsWith("UNDO|")
-                    );
-
-                const sizes =
-                    lines
-                        .filter((line) =>
-                            line.startsWith(
-                                "STACK_SIZE|"
-                            )
-                        )
-                        .map((line) =>
-                            Number(
-                                line.split("|")[1]
-                            )
-                        );
-
-                res.json({
-                    success: true,
-
-                    operation: "ADD",
-
-                    pushed: Boolean(pushed),
-
-                    undone: Boolean(undo),
-
-                    stackSizeBeforeUndo:
-                        sizes[0] ?? 0,
-
-                    stackSizeAfterUndo:
-                        sizes[1] ?? 0,
-
-                    dataStructure:
-                        "Stack",
-
-                    principle:
-                        "LIFO",
-                });
-            }
-        );
-    }
-);
-
-// ==========================================
-// REAL UNDO API
-// ==========================================
-app.post("/api/undo", (req, res) => {
-    execFile(
-        cppEngine,
-        ["undo"],
-        {
-            cwd: projectRoot,
-        },
-        (error, stdout, stderr) => {
-
-            console.log(
-                "UNDO STDOUT:",
-                JSON.stringify(stdout)
-            );
-
-            console.log(
-                "UNDO STDERR:",
-                JSON.stringify(stderr)
-            );
-
-            console.log(
-                "UNDO ERROR:",
+        } catch (error) {
+            console.error(
+                "ADD STUDENT ERROR:",
                 error
             );
 
-            // C++ process itself failed
-            if (error) {
+            res.status(500).json({
+                success: false,
+                message:
+                    "Failed to add student.",
+                error:
+                    error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// UPDATE STUDENT
+// ======================================================
+
+app.put(
+    "/api/students/:rollNo",
+    async (req, res) => {
+        const rollNo =
+            Number(
+                req.params.rollNo
+            );
+
+        const {
+            name,
+            email,
+            department,
+            year,
+            cgpa,
+        } = req.body;
+
+        if (
+            Number.isNaN(rollNo)
+        ) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Invalid roll number.",
+            });
+        }
+
+        if (
+            !name ||
+            !email ||
+            !department ||
+            !year ||
+            cgpa === undefined
+        ) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    "All student fields are required.",
+            });
+        }
+
+        const numericCgpa =
+            Number(cgpa);
+
+        if (
+            Number.isNaN(
+                numericCgpa
+            )
+        ) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    "CGPA must be numeric.",
+            });
+        }
+
+        try {
+            const before =
+                await studentsCollection.findOne(
+                    {
+                        rollNo,
+                    }
+                );
+
+            if (!before) {
+                return res.status(404).json({
+                    success: false,
+                    message:
+                        "Student not found.",
+                });
+            }
+
+            await syncMongoToCppFile();
+
+            const cpp =
+                await runCpp([
+                    "update",
+                    rollNo,
+                    name,
+                    email,
+                    department,
+                    year,
+                    numericCgpa,
+                ]);
+
+            if (
+                cpp.output ===
+                "NOT_FOUND"
+            ) {
+                return res.status(404).json({
+                    success: false,
+                    message:
+                        "C++ could not find student.",
+                });
+            }
+
+            if (
+                cpp.output ===
+                "SAVE_FAILED"
+            ) {
                 return res.status(500).json({
                     success: false,
                     message:
-                        "C++ Undo process failed.",
-                    error: error.message,
+                        "C++ could not save students.txt.",
                 });
             }
 
-            const output =
-                String(stdout || "").trim();
-
-            // Successful Undo
             if (
-                output.includes("UNDO_SUCCESS")
-            ) {
-                const parts =
-                    output.split("|");
-
-                return res.json({
-                    success: true,
-                    operation:
-                        parts[1] || "",
-                    rollNo:
-                        Number(parts[2]) || 0,
-                    studentName:
-                        parts[3] || "",
-                    message:
-                        "Last operation was undone.",
-                });
-            }
-
-            // Nothing to undo
-            if (
-                output.includes(
-                    "NOTHING_TO_UNDO"
+                !cpp.output.includes(
+                    "STUDENT_UPDATED"
                 )
+            ) {
+                throw new Error(
+                    "Unexpected C++ UPDATE response: " +
+                    cpp.output
+                );
+            }
+
+            const syncedStudents =
+                await syncCppFileToMongo();
+
+            const after =
+                syncedStudents.find(
+                    (student) =>
+                        student.rollNo ===
+                        rollNo
+                );
+
+            await saveUndoRecord(
+                "UPDATE",
+                before,
+                after
+            );
+
+            res.json({
+                success: true,
+                message:
+                    "Student updated successfully.",
+                student:
+                    after || null,
+            });
+        } catch (error) {
+            console.error(
+                "UPDATE STUDENT ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Failed to update student.",
+                error:
+                    error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// DELETE STUDENT
+// ======================================================
+
+app.delete(
+    "/api/students/:rollNo",
+    async (req, res) => {
+        const rollNo =
+            Number(
+                req.params.rollNo
+            );
+
+        if (
+            Number.isNaN(rollNo)
+        ) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Invalid roll number.",
+            });
+        }
+
+        try {
+            const before =
+                await studentsCollection.findOne(
+                    {
+                        rollNo,
+                    }
+                );
+
+            if (!before) {
+                return res.status(404).json({
+                    success: false,
+                    message:
+                        "Student not found.",
+                });
+            }
+
+            await syncMongoToCppFile();
+
+            const cpp =
+                await runCpp([
+                    "delete",
+                    rollNo,
+                ]);
+
+            if (
+                cpp.output ===
+                "NOT_FOUND"
+            ) {
+                return res.status(404).json({
+                    success: false,
+                    message:
+                        "C++ could not find student.",
+                });
+            }
+
+            if (
+                cpp.output ===
+                "SAVE_FAILED"
+            ) {
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        "C++ could not save students.txt.",
+                });
+            }
+
+            if (
+                !cpp.output.includes(
+                    "STUDENT_DELETED"
+                )
+            ) {
+                throw new Error(
+                    "Unexpected C++ DELETE response: " +
+                    cpp.output
+                );
+            }
+
+            await syncCppFileToMongo();
+
+            await saveUndoRecord(
+                "DELETE",
+                before,
+                null
+            );
+
+            res.json({
+                success: true,
+                message:
+                    "Student deleted successfully.",
+                student:
+                    before,
+            });
+        } catch (error) {
+            console.error(
+                "DELETE STUDENT ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Failed to delete student.",
+                error:
+                    error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// LINEAR SEARCH
+// ======================================================
+
+app.get(
+    "/api/search/linear/:rollNo",
+    async (req, res) => {
+        const rollNo =
+            Number(
+                req.params.rollNo
+            );
+
+        if (
+            Number.isNaN(rollNo)
+        ) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Invalid roll number.",
+            });
+        }
+
+        try {
+            await syncMongoToCppFile();
+
+            const cpp =
+                await runCpp([
+                    "linear-search",
+                    rollNo,
+                ]);
+
+            const result =
+                parseSearchOutput(
+                    cpp.output,
+                    "Linear Search"
+                );
+
+            result.timeComplexity =
+                "O(n)";
+
+            result.spaceComplexity =
+                "O(1)";
+
+            res.json(result);
+        } catch (error) {
+            console.error(
+                "LINEAR SEARCH ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Linear Search failed.",
+                error:
+                    error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// BINARY SEARCH
+// ======================================================
+
+app.get(
+    "/api/search/binary/:rollNo",
+    async (req, res) => {
+        const rollNo =
+            Number(
+                req.params.rollNo
+            );
+
+        if (
+            Number.isNaN(rollNo)
+        ) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Invalid roll number.",
+            });
+        }
+
+        try {
+            await syncMongoToCppFile();
+
+            const cpp =
+                await runCpp([
+                    "binary-search",
+                    rollNo,
+                ]);
+
+            const result =
+                parseSearchOutput(
+                    cpp.output,
+                    "Binary Search"
+                );
+
+            result.timeComplexity =
+                "O(log n)";
+
+            result.spaceComplexity =
+                "O(1)";
+
+            res.json(result);
+        } catch (error) {
+            console.error(
+                "BINARY SEARCH ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Binary Search failed.",
+                error:
+                    error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// COMPARE SEARCHING
+// ======================================================
+
+app.get(
+    "/api/search/compare/:rollNo",
+    async (req, res) => {
+        const rollNo =
+            Number(
+                req.params.rollNo
+            );
+
+        if (
+            Number.isNaN(rollNo)
+        ) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Invalid roll number.",
+            });
+        }
+
+        try {
+            await syncMongoToCppFile();
+
+            const [
+                linearCpp,
+                binaryCpp,
+            ] = await Promise.all([
+                runCpp([
+                    "linear-search",
+                    rollNo,
+                ]),
+                runCpp([
+                    "binary-search",
+                    rollNo,
+                ]),
+            ]);
+
+            const linear =
+                parseSearchOutput(
+                    linearCpp.output,
+                    "Linear Search"
+                );
+
+            const binary =
+                parseSearchOutput(
+                    binaryCpp.output,
+                    "Binary Search"
+                );
+
+            linear.timeComplexity =
+                "O(n)";
+
+            linear.spaceComplexity =
+                "O(1)";
+
+            binary.timeComplexity =
+                "O(log n)";
+
+            binary.spaceComplexity =
+                "O(1)";
+
+            res.json({
+                success: true,
+                rollNo,
+                linearSearch:
+                    linear,
+                binarySearch:
+                    binary,
+                comparisonDifference:
+                    Math.abs(
+                        linear.comparisons -
+                        binary.comparisons
+                    ),
+            });
+        } catch (error) {
+            console.error(
+                "SEARCH COMPARE ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Unable to compare search algorithms.",
+                error:
+                    error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// INSERTION SORT
+// ======================================================
+
+app.get(
+    "/api/sort/insertion",
+    async (req, res) => {
+        try {
+            await syncMongoToCppFile();
+
+            const cpp =
+                await runCpp([
+                    "insertion-sort",
+                ]);
+
+            const result =
+                parseSortOutput(
+                    cpp.output,
+                    "Insertion Sort",
+                    "O(n^2)"
+                );
+
+            res.json(result);
+        } catch (error) {
+            console.error(
+                "INSERTION SORT ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Insertion Sort failed.",
+                error:
+                    error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// MERGE SORT
+// ======================================================
+
+app.get(
+    "/api/sort/merge",
+    async (req, res) => {
+        try {
+            await syncMongoToCppFile();
+
+            const cpp =
+                await runCpp([
+                    "merge-sort",
+                ]);
+
+            const result =
+                parseSortOutput(
+                    cpp.output,
+                    "Merge Sort",
+                    "O(n log n)"
+                );
+
+            res.json(result);
+        } catch (error) {
+            console.error(
+                "MERGE SORT ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Merge Sort failed.",
+                error:
+                    error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// COMPARE SORTING
+// ======================================================
+
+app.get(
+    "/api/sort/compare",
+    async (req, res) => {
+        try {
+            await syncMongoToCppFile();
+
+            const [
+                insertionCpp,
+                mergeCpp,
+            ] = await Promise.all([
+                runCpp([
+                    "insertion-sort",
+                ]),
+                runCpp([
+                    "merge-sort",
+                ]),
+            ]);
+
+            const insertion =
+                parseSortOutput(
+                    insertionCpp.output,
+                    "Insertion Sort",
+                    "O(n^2)"
+                );
+
+            const merge =
+                parseSortOutput(
+                    mergeCpp.output,
+                    "Merge Sort",
+                    "O(n log n)"
+                );
+
+            res.json({
+                success: true,
+
+                insertionSort:
+                    insertion,
+
+                mergeSort:
+                    merge,
+
+                comparisonDifference:
+                    Math.abs(
+                        insertion.comparisons -
+                        merge.comparisons
+                    ),
+            });
+        } catch (error) {
+            console.error(
+                "SORT COMPARE ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Unable to compare sorting algorithms.",
+                error:
+                    error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// STACK / C++ UNDO
+//
+// IMPORTANT:
+// Actual Stack/Undo logic is performed inside
+// student_list.cpp.
+// MongoDB only stores the resulting state/history.
+// ======================================================
+
+app.get(
+    "/api/stack/test",
+    async (req, res) => {
+        try {
+            await syncMongoToCppFile();
+
+            const beforeCount =
+                await studentsCollection.countDocuments();
+
+            const cpp =
+                await runCpp([
+                    "undo",
+                ]);
+
+            if (
+                cpp.output ===
+                "NOTHING_TO_UNDO"
             ) {
                 return res.status(400).json({
                     success: false,
@@ -1404,72 +1447,192 @@ app.post("/api/undo", (req, res) => {
                 });
             }
 
-            return res.status(500).json({
-                success: false,
-                message:
-                    "Unable to undo the last operation.",
-                cppOutput: output,
-            });
-        }
-    );
-});
-
-// ==========================================
-// REDO API
-// ==========================================
-
-app.post("/api/redo", (req, res) => {
-    execFile(
-        cppEngine,
-        ["redo"],
-        {
-            cwd: projectRoot,
-        },
-        (error, stdout, stderr) => {
-
-            console.log(
-                "REDO STDOUT:",
-                JSON.stringify(stdout)
-            );
-
-            if (error) {
+            if (
+                cpp.output ===
+                "SAVE_FAILED"
+            ) {
                 return res.status(500).json({
                     success: false,
                     message:
-                        "C++ Redo process failed.",
+                        "C++ failed to save after undo.",
                 });
             }
 
-            const output =
-                String(stdout || "").trim();
+            const afterStudents =
+                await syncCppFileToMongo();
+
+            const lines =
+                cpp.output.split("|");
+
+            res.json({
+                success: true,
+                operation:
+                    lines[1] || "",
+                rollNo:
+                    Number(lines[2]) || 0,
+                studentName:
+                    lines[3] || "",
+                stackSizeBeforeUndo:
+                    beforeCount,
+                stackSizeAfterUndo:
+                    afterStudents.length,
+                dataStructure:
+                    "Stack",
+                principle:
+                    "LIFO",
+                cppOutput:
+                    cpp.output,
+            });
+        } catch (error) {
+            console.error(
+                "STACK/UNDO ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Stack/Undo operation failed.",
+                error:
+                    error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// REAL UNDO
+// ======================================================
+
+app.post(
+    "/api/undo",
+    async (req, res) => {
+        try {
+            await syncMongoToCppFile();
+
+            const cpp =
+                await runCpp([
+                    "undo",
+                ]);
 
             if (
-                output.includes("REDO_SUCCESS")
+                cpp.output ===
+                "NOTHING_TO_UNDO"
             ) {
-                const parts =
-                    output.split("|");
-
-                return res.json({
-                    success: true,
-
-                    operation:
-                        parts[1] || "",
-
-                    rollNo:
-                        Number(parts[2]) || 0,
-
-                    studentName:
-                        parts[3] || "",
-
+                return res.status(400).json({
+                    success: false,
                     message:
-                        "Last operation was redone.",
+                        "There is nothing to undo.",
                 });
             }
 
             if (
-                output.includes(
-                    "NOTHING_TO_REDO"
+                cpp.output ===
+                "SAVE_FAILED"
+            ) {
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        "C++ could not save after undo.",
+                });
+            }
+
+            if (
+                !cpp.output.startsWith(
+                    "UNDO_SUCCESS|"
                 )
+            ) {
+                throw new Error(
+                    "Unexpected C++ UNDO response: " +
+                    cpp.output
+                );
+            }
+
+            const parts =
+                cpp.output.split("|");
+
+            const operation =
+                parts[1] || "";
+
+            const rollNo =
+                Number(parts[2]) || 0;
+
+            const studentName =
+                parts[3] || "";
+
+            await syncCppFileToMongo();
+
+            // Move latest Mongo history record
+            // to redo history.
+            const latestUndo =
+                await undoCollection.findOne(
+                    {},
+                    {
+                        sort: {
+                            createdAt: -1,
+                        },
+                    }
+                );
+
+            if (latestUndo) {
+                await saveRedoRecord({
+                    operation:
+                        latestUndo.operation,
+                    beforeStudent:
+                        latestUndo.beforeStudent,
+                    afterStudent:
+                        latestUndo.afterStudent,
+                });
+
+                await undoCollection.deleteOne({
+                    _id:
+                        latestUndo._id,
+                });
+            }
+
+            res.json({
+                success: true,
+                operation,
+                rollNo,
+                studentName,
+                message:
+                    "Last operation was undone using the C++ Stack/Undo implementation.",
+            });
+        } catch (error) {
+            console.error(
+                "UNDO ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Failed to undo last operation.",
+                error:
+                    error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// REAL REDO
+// ======================================================
+
+app.post(
+    "/api/redo",
+    async (req, res) => {
+        try {
+            await syncMongoToCppFile();
+
+            const cpp =
+                await runCpp([
+                    "redo",
+                ]);
+
+            if (
+                cpp.output ===
+                "NOTHING_TO_REDO"
             ) {
                 return res.status(400).json({
                     success: false,
@@ -1478,58 +1641,132 @@ app.post("/api/redo", (req, res) => {
                 });
             }
 
-            return res.status(500).json({
-                success: false,
-                message:
-                    "Unable to redo the last operation.",
-            });
-        }
-    );
-});
-
-// ==========================================
-// QUEUE API
-// ==========================================
-
-app.get("/api/queue/test", (req, res) => {
-    execFile(
-        cppEngine,
-        ["queue-test"],
-        {
-            cwd: projectRoot,
-        },
-        (error, stdout, stderr) => {
-
-            console.log(
-                "QUEUE STDOUT:",
-                JSON.stringify(stdout)
-            );
-
-            if (error) {
-                console.error(
-                    "Queue C++ error:",
-                    error
-                );
-
+            if (
+                cpp.output ===
+                "SAVE_FAILED"
+            ) {
                 return res.status(500).json({
                     success: false,
                     message:
-                        "Queue operation failed.",
+                        "C++ could not save after redo.",
                 });
             }
 
-            const lines =
-                String(stdout || "")
-                    .trim()
-                    .split("\n");
-
-            const sizeBefore =
-                lines.find(
-                    (line) =>
-                        line.startsWith(
-                            "QUEUE_SIZE|"
-                        )
+            if (
+                !cpp.output.startsWith(
+                    "REDO_SUCCESS|"
+                )
+            ) {
+                throw new Error(
+                    "Unexpected C++ REDO response: " +
+                    cpp.output
                 );
+            }
+
+            const parts =
+                cpp.output.split("|");
+
+            const operation =
+                parts[1] || "";
+
+            const rollNo =
+                Number(parts[2]) || 0;
+
+            const studentName =
+                parts[3] || "";
+
+            await syncCppFileToMongo();
+
+            const latestRedo =
+                await redoCollection.findOne(
+                    {},
+                    {
+                        sort: {
+                            createdAt: -1,
+                        },
+                    }
+                );
+
+            if (latestRedo) {
+                await undoCollection.insertOne({
+                    operation:
+                        latestRedo.operation,
+                    beforeStudent:
+                        latestRedo.beforeStudent,
+                    afterStudent:
+                        latestRedo.afterStudent,
+                    createdAt:
+                        new Date(),
+                });
+
+                await redoCollection.deleteOne({
+                    _id:
+                        latestRedo._id,
+                });
+            }
+
+            res.json({
+                success: true,
+                operation,
+                rollNo,
+                studentName,
+                message:
+                    "Last operation was redone using the C++ Stack/Redo implementation.",
+            });
+        } catch (error) {
+            console.error(
+                "REDO ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Failed to redo last operation.",
+                error:
+                    error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// QUEUE TEST
+//
+// Your C++ queue-test loads actual students from
+// students.txt, then performs FIFO operations.
+// ======================================================
+
+app.get(
+    "/api/queue/test",
+    async (req, res) => {
+        try {
+            await syncMongoToCppFile();
+
+            const cpp =
+                await runCpp([
+                    "queue-test",
+                ]);
+
+            const lines =
+                String(cpp.output)
+                    .split(/\r?\n/)
+                    .filter(Boolean);
+
+            const sizes =
+                lines
+                    .filter(
+                        (line) =>
+                            line.startsWith(
+                                "QUEUE_SIZE|"
+                            )
+                    )
+                    .map(
+                        (line) =>
+                            Number(
+                                line.split("|")[1]
+                            ) || 0
+                    );
 
             const front =
                 lines.find(
@@ -1547,19 +1784,6 @@ app.get("/api/queue/test", (req, res) => {
                         )
                 );
 
-            const sizes =
-                lines
-                    .filter((line) =>
-                        line.startsWith(
-                            "QUEUE_SIZE|"
-                        )
-                    )
-                    .map((line) =>
-                        Number(
-                            line.split("|")[1]
-                        )
-                    );
-
             const frontParts =
                 front
                     ? front.split("|")
@@ -1570,12 +1794,12 @@ app.get("/api/queue/test", (req, res) => {
                     ? dequeue.split("|")
                     : [];
 
-            return res.json({
+            res.json({
                 success: true,
-
-                dataStructure: "Queue",
-
-                principle: "FIFO",
+                dataStructure:
+                    "Queue",
+                principle:
+                    "FIFO",
 
                 initialSize:
                     sizes[0] || 0,
@@ -1598,78 +1822,93 @@ app.get("/api/queue/test", (req, res) => {
 
                 dequeuedStudent:
                     dequeueParts[2] || "",
+
+                source:
+                    "MongoDB -> students.txt -> student_list.cpp",
             });
-        }
-    );
-});
-
-// ==========================================
-// LINKED LIST API
-// ==========================================
-
-app.get("/api/linked-list/test", (req, res) => {
-    execFile(
-        cppEngine,
-        ["linked-list-test"],
-        {
-            cwd: projectRoot,
-        },
-        (error, stdout, stderr) => {
-
-            console.log(
-                "LINKED LIST STDOUT:",
-                JSON.stringify(stdout)
+        } catch (error) {
+            console.error(
+                "QUEUE ERROR:",
+                error
             );
 
-            if (error) {
-                console.error(
-                    "Linked List C++ error:",
-                    error
-                );
+            res.status(500).json({
+                success: false,
+                message:
+                    "Queue operation failed.",
+                error:
+                    error.message,
+            });
+        }
+    }
+);
 
-                return res.status(500).json({
-                    success: false,
-                    message:
-                        "Linked List operation failed.",
-                });
-            }
+// ======================================================
+// SINGLY LINKED LIST
+//
+// C++ loads actual students.txt data.
+// ======================================================
+
+app.get(
+    "/api/linked-list/test",
+    async (req, res) => {
+        try {
+            await syncMongoToCppFile();
+
+            const cpp =
+                await runCpp([
+                    "linked-list-test",
+                ]);
 
             const lines =
-                String(stdout || "")
-                    .trim()
-                    .split("\n")
+                String(cpp.output)
+                    .split(/\r?\n/)
                     .filter(Boolean);
 
-            const nodes = lines
-                .filter((line) =>
-                    line.startsWith("NODE|")
-                )
-                .map((line) => {
-                    const parts =
-                        line.split("|");
+            const nodes =
+                lines
+                    .filter(
+                        (line) =>
+                            line.startsWith(
+                                "NODE|"
+                            )
+                    )
+                    .map((line) => {
+                        const parts =
+                            line.split("|");
 
-                    return {
-                        rollNo:
-                            Number(parts[1]) || 0,
-
-                        name:
-                            parts[2] || "",
-                    };
-                });
+                        return {
+                            rollNo:
+                                Number(
+                                    parts[1]
+                                ) || 0,
+                            name:
+                                parts[2] || "",
+                        };
+                    });
 
             const headLine =
-                lines.find((line) =>
-                    line.startsWith("HEAD|")
+                lines.find(
+                    (line) =>
+                        line.startsWith(
+                            "HEAD|"
+                        )
                 );
 
             const tailLine =
-                lines.find((line) =>
-                    line.startsWith("TAIL|")
+                lines.find(
+                    (line) =>
+                        line.startsWith(
+                            "TAIL|"
+                        )
                 );
 
             const sizeLine =
-                lines.find((line) =>
-                    line.startsWith("SIZE|")
+                lines.find(
+                    (line) =>
+                        line.startsWith(
+                            "SIZE|"
+                        )
                 );
 
             const headParts =
@@ -1682,7 +1921,7 @@ app.get("/api/linked-list/test", (req, res) => {
                     ? tailLine.split("|")
                     : [];
 
-            return res.json({
+            res.json({
                 success: true,
 
                 dataStructure:
@@ -1695,7 +1934,6 @@ app.get("/api/linked-list/test", (req, res) => {
                         Number(
                             headParts[1]
                         ) || 0,
-
                     name:
                         headParts[2] || "",
                 },
@@ -1705,7 +1943,6 @@ app.get("/api/linked-list/test", (req, res) => {
                         Number(
                             tailParts[1]
                         ) || 0,
-
                     name:
                         tailParts[2] || "",
                 },
@@ -1716,174 +1953,343 @@ app.get("/api/linked-list/test", (req, res) => {
                             sizeLine.split("|")[1]
                         )
                         : 0,
+
+                source:
+                    "MongoDB -> students.txt -> student_list.cpp",
+            });
+        } catch (error) {
+            console.error(
+                "SINGLY LINKED LIST ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Singly Linked List operation failed.",
+                error:
+                    error.message,
             });
         }
-    );
-});
+    }
+);
 
-// ==========================================
-// DOUBLY LINKED LIST API
-// ==========================================
+// ======================================================
+// DOUBLY LINKED LIST
+//
+// IMPORTANT:
+// Existing untouched student_list.cpp command uses
+// hard-coded demo students 301,302,303.
+// Server cannot change that behavior without modifying
+// the C++ file.
+// ======================================================
 
 app.get(
     "/api/doubly-linked-list/test",
-    (req, res) => {
+    async (req, res) => {
+        try {
+            // We still synchronize the real Mongo data
+            // into students.txt, but the existing C++
+            // doubly-linked-list-test command itself
+            // creates its own demo nodes.
 
-        execFile(
-            cppEngine,
-            ["doubly-linked-list-test"],
-            {
-                cwd: projectRoot,
-            },
-            (error, stdout, stderr) => {
+            await syncMongoToCppFile();
 
-                console.log(
-                    "DOUBLY LINKED LIST STDOUT:",
-                    JSON.stringify(stdout)
+            const cpp =
+                await runCpp([
+                    "doubly-linked-list-test",
+                ]);
+
+            const lines =
+                String(cpp.output)
+                    .split(/\r?\n/)
+                    .filter(Boolean);
+
+            const sizeLine =
+                lines.find(
+                    (line) =>
+                        line.startsWith(
+                            "SIZE|"
+                        )
                 );
 
-                if (error) {
-                    console.error(
-                        "Doubly Linked List C++ error:",
-                        error
-                    );
+            const headLine =
+                lines.find(
+                    (line) =>
+                        line.startsWith(
+                            "HEAD|"
+                        )
+                );
 
-                    return res.status(500).json({
-                        success: false,
-                        message:
-                            "Doubly Linked List operation failed.",
-                    });
-                }
+            const tailLine =
+                lines.find(
+                    (line) =>
+                        line.startsWith(
+                            "TAIL|"
+                        )
+                );
 
-                const lines =
-                    String(stdout || "")
-                        .trim()
-                        .split("\n")
-                        .filter(Boolean);
+            const forwardIndex =
+                lines.indexOf(
+                    "FORWARD"
+                );
 
-                const sizeLine =
-                    lines.find((line) =>
-                        line.startsWith("SIZE|")
-                    );
+            const backwardIndex =
+                lines.indexOf(
+                    "BACKWARD"
+                );
 
-                const headLine =
-                    lines.find((line) =>
-                        line.startsWith("HEAD|")
-                    );
-
-                const tailLine =
-                    lines.find((line) =>
-                        line.startsWith("TAIL|")
-                    );
-
-                const forwardIndex =
-                    lines.indexOf("FORWARD");
-
-                const backwardIndex =
-                    lines.indexOf("BACKWARD");
-
-                const forwardNodes =
-                    forwardIndex !== -1 &&
-                        backwardIndex !== -1
-                        ? lines
-                            .slice(
-                                forwardIndex + 1,
-                                backwardIndex
-                            )
-                            .filter((line) =>
-                                line.startsWith("NODE|")
-                            )
-                        : [];
-
-                const backwardNodes =
+            const forwardNodes =
+                forwardIndex !== -1 &&
                     backwardIndex !== -1
-                        ? lines
-                            .slice(
-                                backwardIndex + 1
-                            )
-                            .filter((line) =>
-                                line.startsWith("NODE|")
-                            )
-                        : [];
+                    ? lines
+                        .slice(
+                            forwardIndex + 1,
+                            backwardIndex
+                        )
+                        .filter(
+                            (line) =>
+                                line.startsWith(
+                                    "NODE|"
+                                )
+                        )
+                    : [];
 
-                const parseNode =
-                    (line) => {
+            const backwardNodes =
+                backwardIndex !== -1
+                    ? lines
+                        .slice(
+                            backwardIndex + 1
+                        )
+                        .filter(
+                            (line) =>
+                                line.startsWith(
+                                    "NODE|"
+                                )
+                        )
+                    : [];
 
-                        const parts =
-                            line.split("|");
+            const parseNode =
+                (line) => {
+                    const parts =
+                        line.split("|");
 
-                        return {
-                            rollNo:
-                                Number(parts[1]) || 0,
-
-                            name:
-                                parts[2] || "",
-                        };
+                    return {
+                        rollNo:
+                            Number(
+                                parts[1]
+                            ) || 0,
+                        name:
+                            parts[2] || "",
                     };
+                };
 
-                const headParts =
-                    headLine
-                        ? headLine.split("|")
-                        : [];
+            const headParts =
+                headLine
+                    ? headLine.split("|")
+                    : [];
 
-                const tailParts =
-                    tailLine
-                        ? tailLine.split("|")
-                        : [];
+            const tailParts =
+                tailLine
+                    ? tailLine.split("|")
+                    : [];
 
-                return res.json({
-                    success: true,
+            res.json({
+                success: true,
 
-                    dataStructure:
-                        "Doubly Linked List",
+                dataStructure:
+                    "Doubly Linked List",
 
-                    size:
-                        sizeLine
-                            ? Number(
-                                sizeLine.split("|")[1]
-                            )
-                            : 0,
+                size:
+                    sizeLine
+                        ? Number(
+                            sizeLine.split("|")[1]
+                        )
+                        : 0,
 
-                    head: {
-                        rollNo:
-                            Number(
-                                headParts[1]
-                            ) || 0,
+                head: {
+                    rollNo:
+                        Number(
+                            headParts[1]
+                        ) || 0,
+                    name:
+                        headParts[2] || "",
+                },
 
-                        name:
-                            headParts[2] || "",
-                    },
+                tail: {
+                    rollNo:
+                        Number(
+                            tailParts[1]
+                        ) || 0,
+                    name:
+                        tailParts[2] || "",
+                },
 
-                    tail: {
-                        rollNo:
-                            Number(
-                                tailParts[1]
-                            ) || 0,
+                forward:
+                    forwardNodes.map(
+                        parseNode
+                    ),
 
-                        name:
-                            tailParts[2] || "",
-                    },
+                backward:
+                    backwardNodes.map(
+                        parseNode
+                    ),
 
-                    forward:
-                        forwardNodes.map(
-                            parseNode
-                        ),
+                source:
+                    "student_list.cpp existing doubly-linked-list-test demo",
 
-                    backward:
-                        backwardNodes.map(
-                            parseNode
-                        ),
-                });
-            }
-        );
+                warning:
+                    "This existing C++ command uses demo students 301, 302 and 303. Real MongoDB students cannot be used here without changing student_list.cpp.",
+            });
+        } catch (error) {
+            console.error(
+                "DOUBLY LINKED LIST ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Doubly Linked List operation failed.",
+                error:
+                    error.message,
+            });
+        }
     }
 );
-// ==========================================
-// START SERVER
-// ==========================================
 
-app.listen(PORT, () => {
-    console.log(
-        `DataNest API running at http://localhost:${PORT}`
-    );
-});
+// ======================================================
+// OPTIONAL: SYNC STATUS
+// ======================================================
+
+app.get(
+    "/api/dsa/sync-status",
+    async (req, res) => {
+        try {
+            const students =
+                await studentsCollection
+                    .find({})
+                    .sort({
+                        rollNo: 1,
+                    })
+                    .toArray();
+
+            let fileExists = true;
+            let fileStudents = [];
+
+            try {
+                const content =
+                    await fs.readFile(
+                        studentsFile,
+                        "utf8"
+                    );
+
+                fileStudents =
+                    content
+                        .split(/\r?\n/)
+                        .filter(Boolean)
+                        .map(
+                            parseStudentLine
+                        )
+                        .filter(Boolean);
+            } catch (error) {
+                if (
+                    error.code ===
+                    "ENOENT"
+                ) {
+                    fileExists = false;
+                } else {
+                    throw error;
+                }
+            }
+
+            res.json({
+                success: true,
+                mongodbCount:
+                    students.length,
+                studentsFileExists:
+                    fileExists,
+                studentsFileCount:
+                    fileStudents.length,
+                cppEngine,
+                studentsFile,
+            });
+        } catch (error) {
+            res.status(500).json({
+                success: false,
+                message:
+                    "Unable to check DSA sync status.",
+                error:
+                    error.message,
+            });
+        }
+    }
+);
+
+// ======================================================
+// START SERVER
+// ======================================================
+
+async function startServer() {
+    try {
+        await ensureDsaDirectory();
+
+        await connectMongoDB();
+
+        await findCppEngine();
+
+        // IMPORTANT:
+        // On startup, MongoDB is the source of truth.
+        // Do NOT allow old students.txt data to overwrite
+        // MongoDB.
+        await syncMongoToCppFile();
+
+        app.listen(
+            PORT,
+            () => {
+                console.log(
+                    `DataNest API running at http://localhost:${PORT}`
+                );
+
+                console.log(
+                    "MongoDB -> students.txt -> C++ DSA synchronization enabled."
+                );
+            }
+        );
+    } catch (error) {
+        console.error(
+            "SERVER STARTUP FAILED:",
+            error
+        );
+
+        process.exit(1);
+    }
+}
+
+startServer();
+
+// ======================================================
+// GRACEFUL SHUTDOWN
+// ======================================================
+
+async function shutdown() {
+    try {
+        await mongoClient.close();
+
+        console.log(
+            "MongoDB connection closed."
+        );
+    } finally {
+        process.exit(0);
+    }
+}
+
+process.on(
+    "SIGINT",
+    shutdown
+);
+
+process.on(
+    "SIGTERM",
+    shutdown
+);

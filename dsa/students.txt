@@ -1,10 +1,10 @@
-302|Priya Mehta|priya302@test.com|ECE|2nd|8.2|Active
-303|Rahul Verma|rahul303@test.com|CSE|3rd|7.8|Active
-304|Neha Singh|neha304@test.com|ECE|2nd|8.4|Active
-305|Karan Patel|karan305@test.com|ME|1st|7.2|Active
-307|Ananya Gupta|ananya307@test.com|CSE|2nd|9.1|Active
-308|Rohan Kumar|rohan308@test.com|IT|3rd|8|Active
-309|Simran Kaur|simran309@test.com|CSE|1st|8.8|Active
-310|Vivek Shah|vivek310@test.com|IT|2nd|7.6|Active
-311|Pooja Nair|pooja311@test.com|ECE|3rd|9|Active
-69|Ayush Dudhe|ayushdudhe@gmail.com|E&TC|3rd|9.7|Active
+101|Ayush Dudhe|ayush@gmail.com|E&TC|3rd|9.2|Active
+102|sanket parit|sanket@gmail.com|E&TC|3rd|9.9|Active
+103|Aniket Sapkal|aniket@gmail.com|E&TC|3rd|9.6|Active
+104|Abhishek Gavhane|abhishek@gmail.com|E&TC|3rd|9.9|Active
+105|vinayak Bhujbal|vinayak@gmail.com|E&TC|3rd|9.7|Active
+106|Kabir singh|kabir@gmail.com|CSE|3rd|9.1|Active
+107|Rehman Dakait|rehman@gmail.com|Mechanical|4th|8.1|Active
+108|Hamza Ali Mazari|hamza@gmail.com|IT|4th|8.9|Active
+109|Narendra Modi|naru@gmail.com|E&TC|4th|10|Active
+110|Rahul Gandhi|Rahulya@gmail.com|E&TC|4th|9.9|Active
