@@ -1,4 +1,4 @@
-import API_URL from "../config/api";
+import { apiFetch } from "../config/api";
 import { useState } from "react";
 import {
     Search as SearchIcon,
@@ -42,8 +42,8 @@ function Search() {
             setResult(null);
 
             const response =
-                await fetch(
-                    `${API_URL}/api/search/${algorithm}/${rollNo}`
+                await apiFetch(
+                    `/api/search/${algorithm}/${rollNo}`
                 );
 
             const data =
@@ -90,8 +90,8 @@ function Search() {
             setCompareResult(null);
 
             const response =
-                await fetch(
-                    `${API_URL}/api/search/compare/${rollNo}`
+                await apiFetch(
+                    `/api/search/compare/${rollNo}`
                 );
 
             const data =

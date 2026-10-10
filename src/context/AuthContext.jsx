@@ -1,8 +1,10 @@
+import API_URL from "../config/api";
 import {
   createContext,
   useContext,
   useState,
 } from "react";
+
 
 const AuthContext = createContext(null);
 
@@ -27,17 +29,11 @@ export function AuthProvider({ children }) {
   // LOGIN
   // =====================================
 
-  const login = (
+  const login = async (
     emailOrData,
     password,
     role
   ) => {
-    // Support both:
-    // login(email, password, role)
-    //
-    // and:
-    // login({ email, password, role })
-
     let email;
     let actualPassword;
     let actualRole;
@@ -55,73 +51,73 @@ export function AuthProvider({ children }) {
       actualRole = role;
     }
 
-    // Make sure email is a string
     const cleanEmail = String(email || "")
       .trim()
       .toLowerCase();
 
-    let authenticatedUser = null;
+    try {
+      const response = await fetch(
+        `${API_URL}/api/auth/login`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            email: cleanEmail,
+            password: actualPassword,
+          }),
+        }
+      );
 
-    // =====================================
-    // TEACHER
-    // =====================================
+      const data = await response.json();
 
-    if (
-      actualRole === "teacher" &&
-      cleanEmail === "teacher@datanest.com" &&
-      actualPassword === "teacher123"
-    ) {
-      authenticatedUser = {
-        name: "Teacher",
-        email: "teacher@datanest.com",
-        role: "teacher",
+      if (!response.ok || !data.success) {
+        return {
+          success: false,
+          message:
+            data.message ||
+            "Login failed.",
+        };
+      }
+
+      // Make sure selected role matches backend role
+      if (actualRole && data.user.role !== actualRole) {
+        return {
+          success: false,
+          message:
+            "Selected role does not match this account.",
+        };
+      }
+
+      // Save JWT
+      localStorage.setItem(
+        "datanest_token",
+        data.token
+      );
+
+      // Save user
+      localStorage.setItem(
+        "datanest_user",
+        JSON.stringify(data.user)
+      );
+
+      setUser(data.user);
+
+      return {
+        success: true,
+        user: data.user,
+        token: data.token,
       };
-    }
+    } catch (error) {
+      console.error("Login error:", error);
 
-    // =====================================
-    // STUDENT
-    // =====================================
-
-    if (
-      actualRole === "student" &&
-      cleanEmail === "student@datanest.com" &&
-      actualPassword === "student123"
-    ) {
-      authenticatedUser = {
-        name: "Rahul Sharma",
-        email: "student@datanest.com",
-        role: "student",
-        rollNo: 101,
-      };
-    }
-
-    // =====================================
-    // INVALID
-    // =====================================
-
-    if (!authenticatedUser) {
       return {
         success: false,
         message:
-          "Invalid email, password, or selected role.",
+          "Unable to connect to DataNest server.",
       };
     }
-
-    // =====================================
-    // SAVE USER
-    // =====================================
-
-    localStorage.setItem(
-      "datanest_user",
-      JSON.stringify(authenticatedUser)
-    );
-
-    setUser(authenticatedUser);
-
-    return {
-      success: true,
-      user: authenticatedUser,
-    };
   };
 
   // =====================================
@@ -132,6 +128,7 @@ export function AuthProvider({ children }) {
     localStorage.removeItem(
       "datanest_user"
     );
+    localStorage.removeItem("datanest_token");
 
     setUser(null);
   };

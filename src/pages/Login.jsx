@@ -69,41 +69,33 @@ function Login() {
   // LOGIN
   // --------------------------------
 
-  const handleLogin = (event) => {
+  const handleLogin = async (event) => {
     event.preventDefault();
 
     setError("");
 
     // Basic validation
     if (!email.trim()) {
-      setError(
-        "Please enter your email address."
-      );
-
+      setError("Please enter your email address.");
       return;
     }
 
     if (!password.trim()) {
-      setError(
-        "Please enter your password."
-      );
-
+      setError("Please enter your password.");
       return;
     }
 
     setLoading(true);
 
-    // Small delay to make it feel like
-    // a real authentication process.
-    setTimeout(() => {
-      const result = login({
+    try {
+      const result = await login({
         email: email.trim(),
         password,
         role,
       });
 
       if (!result.success) {
-        setError(result.message);
+        setError(result.message || "Login failed.");
         setLoading(false);
         return;
       }
@@ -112,39 +104,19 @@ function Login() {
         navigate("/dashboard", {
           replace: true,
         });
-      } else {
+      } else if (result.user.role === "student") {
         navigate("/student-dashboard", {
           replace: true,
         });
       }
-
+    } catch (error) {
+      console.error("Login error:", error);
+      setError("Unable to connect to the server.");
+    } finally {
       setLoading(false);
-    }, 500);
+    }
   };
 
-  // --------------------------------
-  // DEMO CREDENTIALS
-  // --------------------------------
-
-  const demoEmail =
-    role === "teacher"
-      ? "teacher@datanest.com"
-      : "student@datanest.com";
-
-  const demoPassword =
-    role === "teacher"
-      ? "teacher123"
-      : "student123";
-
-  // --------------------------------
-  // FILL DEMO ACCOUNT
-  // --------------------------------
-
-  const fillDemoAccount = () => {
-    setEmail(demoEmail);
-    setPassword(demoPassword);
-    setError("");
-  };
 
   return (
     <div className="login-page">
@@ -254,6 +226,8 @@ function Login() {
           className="login-card"
           onSubmit={handleLogin}
         >
+
+
 
           <div className="mobile-login-logo">
 
@@ -475,58 +449,58 @@ function Login() {
               : "Sign In"}
           </button>
 
-          {/* DEMO ACCOUNT */}
-
           <div
-            className="demo-account"
-            onClick={fillDemoAccount}
-            role="button"
-            tabIndex={0}
+            style={{
+              textAlign: "center",
+              marginTop: "18px",
+              fontSize: "13px",
+              color: "#64748b",
+            }}
           >
-
-            <div className="demo-header">
-              <span>
-                Demo Account
-              </span>
-
-              <small>
-                Click to use
-              </small>
-            </div>
-
-            <div className="demo-details">
-
-              <div>
-
-                <span>
-                  Email
-                </span>
-
-                <strong>
-                  {demoEmail}
-                </strong>
-
-              </div>
-
-              <div>
-
-                <span>
-                  Password
-                </span>
-
-                <strong>
-                  {demoPassword}
-                </strong>
-
-              </div>
-
-            </div>
-
+            {role === "teacher" ? (
+              <>
+                Don't have a teacher account?{" "}
+                <button
+                  type="button"
+                  onClick={() => navigate("/register")}
+                  style={{
+                    border: "none",
+                    background: "none",
+                    padding: 0,
+                    cursor: "pointer",
+                    fontWeight: "600",
+                    color: "#0f9fa3",
+                  }}
+                >
+                  Create account
+                </button>
+              </>
+            ) : (
+              <>
+                New student?{" "}
+                <button
+                  type="button"
+                  onClick={() =>
+                    navigate("/student-register")
+                  }
+                  style={{
+                    border: "none",
+                    background: "none",
+                    padding: 0,
+                    cursor: "pointer",
+                    fontWeight: "600",
+                    color: "#0f9fa3",
+                  }}
+                >
+                  Create student account
+                </button>
+              </>
+            )}
           </div>
 
-          <p className="login-note">
-            Demo authentication • Local development
-          </p>
+          {/* DEMO ACCOUNT */}
+
+
 
         </form>
 

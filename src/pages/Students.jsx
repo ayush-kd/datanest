@@ -1,44 +1,9 @@
-import API_URL from "../config/api";
+import { apiFetch } from "../config/api";
 
 import {
     useEffect,
     useState,
 } from "react";
-
-const initialStudents = [
-    {
-        rollNo: 101,
-        name: "Rahul Sharma",
-        department: "CSE",
-        year: "2nd",
-        cgpa: 8.9,
-        status: "Active",
-    },
-    {
-        rollNo: 102,
-        name: "Aman Patil",
-        department: "E&TC",
-        year: "2nd",
-        cgpa: 8.5,
-        status: "Active",
-    },
-    {
-        rollNo: 103,
-        name: "Neha Joshi",
-        department: "IT",
-        year: "3rd",
-        cgpa: 9.1,
-        status: "Active",
-    },
-    {
-        rollNo: 104,
-        name: "Arjun Singh",
-        department: "CSE",
-        year: "1st",
-        cgpa: 8.2,
-        status: "Active",
-    },
-];
 
 function Students() {
     const [students, setStudents] =
@@ -58,6 +23,7 @@ function Students() {
             department: "",
             year: "",
             cgpa: "",
+            attendance: "",
         });
 
     const [formError, setFormError] =
@@ -78,10 +44,7 @@ function Students() {
                 setLoading(true);
                 setApiError("");
 
-                const response = await fetch(
-                    `${API_URL}/api/students`
-                );
-
+                const response = await apiFetch("/api/students")
                 if (!response.ok) {
                     throw new Error(
                         "Failed to load students."
@@ -144,6 +107,7 @@ function Students() {
 
         const rollNo = Number(formData.rollNo);
         const cgpa = Number(formData.cgpa);
+        const numericAttendance = Number(formData.attendance);
 
         if (
             !formData.rollNo ||
@@ -152,6 +116,7 @@ function Students() {
             !formData.department ||
             !formData.year ||
             formData.cgpa === ""
+            || formData.attendance === ""
         ) {
             setFormError(
                 "Please fill in all student fields."
@@ -180,9 +145,21 @@ function Students() {
             return;
         }
 
+        if (
+            Number.isNaN(numericAttendance) ||
+            numericAttendance < 0 ||
+            numericAttendance > 100
+        ) {
+            setFormError(
+                "Attendance must be between 0 and 100."
+            );
+
+            return;
+        }
+
         try {
-            const response = await fetch(
-                `${API_URL}/api/students`,
+            const response = await apiFetch(
+                "/api/students",
                 {
                     method: "POST",
 
@@ -199,6 +176,7 @@ function Students() {
                             formData.department,
                         year: formData.year,
                         cgpa,
+                        attendance: numericAttendance,
                     }),
                 }
             );
@@ -215,9 +193,7 @@ function Students() {
 
             // Reload students from C++ backend
             const studentsResponse =
-                await fetch(
-                    `${API_URL}/api/students`
-                );
+                await apiFetch("/api/students")
 
             const studentsData =
                 await studentsResponse.json();
@@ -240,6 +216,7 @@ function Students() {
                 department: "",
                 year: "",
                 cgpa: "",
+                attendance: "",
             });
 
             setFormError("");
@@ -267,13 +244,15 @@ function Students() {
         setFormError("");
 
         const cgpa = Number(formData.cgpa);
+        const numericAttendance = Number(formData.attendance);
 
         if (
             !formData.name.trim() ||
             !formData.email.trim() ||
             !formData.department ||
             !formData.year ||
-            formData.cgpa === ""
+            formData.cgpa === "" ||
+            formData.attendance === ""
         ) {
             setFormError(
                 "Please fill in all student fields."
@@ -294,6 +273,18 @@ function Students() {
             return;
         }
 
+        if (
+            Number.isNaN(numericAttendance) ||
+            numericAttendance < 0 ||
+            numericAttendance > 100
+        ) {
+            setFormError(
+                "Attendance must be between 0 and 100."
+            );
+
+            return;
+        }
+
         if (!editingStudent) {
             setFormError(
                 "No student selected for editing."
@@ -303,8 +294,8 @@ function Students() {
         }
 
         try {
-            const response = await fetch(
-                `${API_URL}/api/students/${editingStudent.rollNo}`,
+            const response = await apiFetch(
+                `/api/students/${editingStudent.rollNo}`,
                 {
                     method: "PUT",
 
@@ -316,10 +307,10 @@ function Students() {
                     body: JSON.stringify({
                         name: formData.name.trim(),
                         email: formData.email.trim(),
-                        department:
-                            formData.department,
+                        department: formData.department,
                         year: formData.year,
                         cgpa,
+                        attendance: numericAttendance,
                     }),
                 }
             );
@@ -336,9 +327,7 @@ function Students() {
 
             // Get updated records from C++
             const studentsResponse =
-                await fetch(
-                    `${API_URL}/api/students`
-                );
+                await apiFetch("/api/students")
 
             const studentsData =
                 await studentsResponse.json();
@@ -366,6 +355,8 @@ function Students() {
                 department: "",
                 year: "",
                 cgpa: "",
+                attendance: "",
+
             });
 
             setFormError("");
@@ -396,6 +387,7 @@ function Students() {
             department: student.department,
             year: student.year,
             cgpa: String(student.cgpa),
+            attendance: String(student.attendance ?? ""),
         });
 
         setFormError("");
@@ -415,8 +407,8 @@ function Students() {
         try {
             setApiError("");
 
-            const response = await fetch(
-                `${API_URL}/api/students/${rollNo}`,
+            const response = await apiFetch(
+                `/api/students/${rollNo}`,
                 {
                     method: "DELETE",
                 }
@@ -434,9 +426,7 @@ function Students() {
 
             // Reload students from C++ backend
             const studentsResponse =
-                await fetch(
-                    `${API_URL}/api/students`
-                );
+                await apiFetch("/api/students")
 
             const studentsData =
                 await studentsResponse.json();
@@ -687,6 +677,20 @@ function Students() {
                             />
                         </div>
 
+                        <div className="form-group">
+                            <label>Attendance (%)</label>
+
+                            <input
+                                type="number"
+                                name="attendance"
+                                value={formData.attendance}
+                                onChange={handleFormChange}
+                                min="0"
+                                max="100"
+                                placeholder="e.g. 87"
+                            />
+                        </div>
+
                         <div className="student-form-actions">
 
                             <button
@@ -761,6 +765,7 @@ function Students() {
                                 <th>DEPARTMENT</th>
                                 <th>YEAR</th>
                                 <th>CGPA</th>
+                                <th>ATTENDANCE</th>
                                 <th>STATUS</th>
                                 <th>ACTIONS</th>
                             </tr>
@@ -770,7 +775,7 @@ function Students() {
                             {loading ? (
                                 <tr>
                                     <td
-                                        colSpan="7"
+                                        colSpan="8"
                                         className="empty-state"
                                     >
                                         Loading student records...
@@ -812,6 +817,12 @@ function Students() {
                                         </td>
 
                                         <td>
+                                            <strong>
+                                                {student.attendance ?? 0}%
+                                            </strong>
+                                        </td>
+
+                                        <td>
                                             <span className="status-badge">
                                                 {student.status}
                                             </span>
@@ -849,7 +860,7 @@ function Students() {
                             ) : (
                                 <tr>
                                     <td
-                                        colSpan="7"
+                                        colSpan="8"
                                         className="empty-state"
                                     >
                                         No students found.

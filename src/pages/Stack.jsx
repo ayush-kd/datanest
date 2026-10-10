@@ -1,4 +1,4 @@
-import API_URL from "../config/api";
+import { apiFetch } from "../config/api";
 import { useState } from "react";
 import {
     Layers,
@@ -25,8 +25,8 @@ function Stack() {
             setError("");
             setResult(null);
 
-            const response = await fetch(
-                `${API_URL}/api/undo`,
+            const response = await apiFetch(
+                `/api/undo`,
                 {
                     method: "POST",
                 }
@@ -74,8 +74,8 @@ function Stack() {
             setError("");
             setResult(null);
 
-            const response = await fetch(
-                `${API_URL}/api/redo`,
+            const response = await apiFetch(
+                `/api/redo`,
                 {
                     method: "POST",
                 }

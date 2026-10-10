@@ -5,6 +5,8 @@ import {
     ClipboardList,
 } from "lucide-react";
 
+import { apiFetch } from "../config/api";
+
 function Requests() {
     const [requests, setRequests] = useState([]);
 
@@ -12,66 +14,79 @@ function Requests() {
     // LOAD REQUESTS
     // =====================================
 
-    const loadRequests = () => {
-        const savedRequests =
-            JSON.parse(
-                localStorage.getItem("studentRequests")
-            ) || [];
+    const loadRequests = async () => {
+        try {
+            const response = await apiFetch("/api/requests");
 
-        setRequests(savedRequests);
+            const data = await response.json();
+
+            if (!response.ok || !data.success) {
+                throw new Error(
+                    data.message || "Failed to load requests."
+                );
+            }
+
+            setRequests(
+                Array.isArray(data.requests)
+                    ? data.requests
+                    : []
+            );
+        } catch (error) {
+            console.error(
+                "Load requests error:",
+                error
+            );
+
+            setRequests([]);
+        }
     };
 
     useEffect(() => {
         loadRequests();
-
-        // Update when another tab changes requests
-        const handleStorage = (event) => {
-            if (event.key === "studentRequests") {
-                loadRequests();
-            }
-        };
-
-        window.addEventListener(
-            "storage",
-            handleStorage
-        );
-
-        return () => {
-            window.removeEventListener(
-                "storage",
-                handleStorage
-            );
-        };
     }, []);
 
     // =====================================
     // UPDATE REQUEST STATUS
     // =====================================
 
-    const updateStatus = (id, status) => {
-        const savedRequests =
-            JSON.parse(
-                localStorage.getItem("studentRequests")
-            ) || [];
-
-        const updatedRequests =
-            savedRequests.map((request) =>
-                request.id === id
-                    ? {
-                        ...request,
+    const updateStatus = async (id, status) => {
+        try {
+            const response = await apiFetch(
+                `/api/requests/${id}/status`,
+                {
+                    method: "PUT",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({
                         status,
-                        updatedAt:
-                            new Date().toLocaleString(),
-                    }
-                    : request
+                    }),
+                }
             );
 
-        localStorage.setItem(
-            "studentRequests",
-            JSON.stringify(updatedRequests)
-        );
+            const data = await response.json();
 
-        setRequests(updatedRequests);
+            if (!response.ok || !data.success) {
+                throw new Error(
+                    data.message ||
+                    "Failed to update request status."
+                );
+            }
+
+            // Reload from MongoDB
+            await loadRequests();
+
+        } catch (error) {
+            console.error(
+                "Update request status error:",
+                error
+            );
+
+            alert(
+                error.message ||
+                "Unable to update request status."
+            );
+        }
     };
 
     // =====================================
@@ -221,7 +236,7 @@ function Requests() {
                             .reverse()
                             .map((request) => (
                                 <div
-                                    key={request.id}
+                                    key={request._id}
                                     style={{
                                         border:
                                             "1px solid #e2e7ec",
@@ -240,6 +255,8 @@ function Requests() {
                                             gap: "20px",
                                         }}
                                     >
+
+
                                         <div>
                                             <h3
                                                 style={{
@@ -247,7 +264,7 @@ function Requests() {
                                                     fontSize: "15px",
                                                 }}
                                             >
-                                                {request.type}
+                                                {request.requestType}
                                             </h3>
 
                                             <p
@@ -321,7 +338,7 @@ function Requests() {
                                             </span>
 
                                             <strong>
-                                                {request.student}
+                                                {request.studentName}
                                             </strong>
                                         </div>
 
@@ -339,8 +356,7 @@ function Requests() {
                                             </span>
 
                                             <strong>
-                                                {request.rollNo ||
-                                                    "—"}
+                                                {request.studentRollNo || "—"}
                                             </strong>
                                         </div>
 
@@ -358,8 +374,7 @@ function Requests() {
                                             </span>
 
                                             <strong>
-                                                {request.email ||
-                                                    "—"}
+                                                {request.studentEmail || "—"}
                                             </strong>
                                         </div>
                                     </div>
@@ -397,7 +412,7 @@ function Requests() {
                                                     <button
                                                         onClick={() =>
                                                             updateStatus(
-                                                                request.id,
+                                                                request._id,
                                                                 "Approved"
                                                             )
                                                         }
@@ -429,7 +444,7 @@ function Requests() {
                                                     <button
                                                         onClick={() =>
                                                             updateStatus(
-                                                                request.id,
+                                                                request._id,
                                                                 "Rejected"
                                                             )
                                                         }

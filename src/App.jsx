@@ -1,4 +1,4 @@
-import API_URL from "./config/api";
+import API_URL, { apiFetch } from "./config/api";
 
 import {
   BrowserRouter,
@@ -12,11 +12,16 @@ import { useEffect, useState } from "react";
 import { useAuth } from "./context/AuthContext";
 import DashboardLayout from "./layouts/DashboardLayout";
 
+
+
+import StudentRegister from "./pages/StudentRegister";
 import Login from "./pages/Login";
+import Register from "./pages/Register";
 import ProtectedRoute from "./components/ProtectedRoute";
 import StudentDashboard from "./pages/StudentDashboard";
 import Students from "./pages/Students";
 import MyProfile from "./pages/MyProfile";
+import TeacherProfile from "./pages/TeacherProfile";
 import Search from "./pages/Search";
 import Sorting from "./pages/Sorting";
 import Stack from "./pages/Stack";
@@ -50,8 +55,8 @@ function Dashboard() {
   useEffect(() => {
     const loadStudents = async () => {
       try {
-        const response = await fetch(
-          `${API_URL}/api/students`
+        const response = await apiFetch(
+          `/api/students`
         );
 
         if (!response.ok) {
@@ -82,20 +87,32 @@ function Dashboard() {
 
   // Load pending requests
   useEffect(() => {
-    const loadRequests = () => {
+    const loadRequests = async () => {
       try {
-        const stored =
-          JSON.parse(
-            localStorage.getItem("studentRequests") || "[]"
-          );
+        const response = await apiFetch(
+          "/api/requests"
+        );
 
-        const pending = stored.filter(
+        const result = await response.json();
+
+        if (!response.ok || !result.success) {
+          throw new Error(
+            result.message ||
+            "Failed to load requests"
+          );
+        }
+
+        const requests = Array.isArray(result.requests)
+          ? result.requests
+          : [];
+
+        const pending = requests.filter(
           (request) =>
-            !request.status ||
             request.status === "Pending"
         ).length;
 
         setPendingRequests(pending);
+
       } catch (error) {
         console.error(
           "Request count error:",
@@ -107,30 +124,18 @@ function Dashboard() {
     };
 
     loadRequests();
-
-    window.addEventListener(
-      "storage",
-      loadRequests
-    );
-
-    return () => {
-      window.removeEventListener(
-        "storage",
-        loadRequests
-      );
-    };
   }, []);
 
   const totalStudents = students.length;
 
-  const averageCGPA =
-    totalStudents > 0
+  const averageAttendance =
+    students.length > 0
       ? (
         students.reduce(
           (sum, student) =>
-            sum + Number(student.cgpa || 0),
+            sum + Number(student.attendance || 0),
           0
-        ) / totalStudents
+        ) / students.length
       ).toFixed(2)
       : "0.00";
 
@@ -149,12 +154,11 @@ function Dashboard() {
           </p>
 
           <h1>
-            Good morning, Teacher 👋
+            Student Monitoring
           </h1>
 
           <p>
-            Here's what's happening with your
-            student records today.
+            Monitor and manage your student records.
           </p>
         </div>
 
@@ -181,11 +185,11 @@ function Dashboard() {
         />
 
         <StatCard
-          title="Average CGPA"
+          title="Average Attendance"
           value={
             loading
               ? "..."
-              : averageCGPA
+              : `${averageAttendance}%`
           }
           description="Across all students"
           trend=""
@@ -305,6 +309,40 @@ function Dashboard() {
           </div>
         </div>
 
+        <div className="table-card" style={{ marginTop: "24px" }}>
+          <div className="section-header">
+            <div>
+              <h3>Student Overview</h3>
+              <p>Students by department</p>
+            </div>
+          </div>
+
+          <div style={{ padding: "20px" }}>
+            {Object.entries(
+              students.reduce((acc, student) => {
+                const department = student.department || "Unknown";
+
+                acc[department] = (acc[department] || 0) + 1;
+
+                return acc;
+              }, {})
+            ).map(([department, count]) => (
+              <div
+                key={department}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  padding: "12px 0",
+                  borderBottom: "1px solid #eef1f4",
+                }}
+              >
+                <span>{department}</span>
+                <strong>{count}</strong>
+              </div>
+            ))}
+          </div>
+        </div>
+
       </section>
     </>
   );
@@ -342,34 +380,41 @@ function MyRequests() {
   const [requests, setRequests] = useState([]);
 
   useEffect(() => {
-    const loadRequests = () => {
-      const savedRequests =
-        JSON.parse(
-          localStorage.getItem("studentRequests")
-        ) || [];
+    const loadRequests = async () => {
+      try {
+        const response = await apiFetch(
+          "/api/my-requests"
+        );
 
-      const myRequests = savedRequests.filter(
-        (request) =>
-          request.email === user?.email
-      );
+        const data = await response.json();
 
-      setRequests(myRequests);
+        if (!response.ok || !data.success) {
+          throw new Error(
+            data.message ||
+            "Failed to load your requests."
+          );
+        }
+
+        setRequests(
+          Array.isArray(data.requests)
+            ? data.requests
+            : []
+        );
+
+      } catch (error) {
+        console.error(
+          "My requests error:",
+          error
+        );
+
+        setRequests([]);
+      }
     };
 
-    loadRequests();
-
-    window.addEventListener(
-      "storage",
-      loadRequests
-    );
-
-    return () => {
-      window.removeEventListener(
-        "storage",
-        loadRequests
-      );
-    };
-  }, [user?.email]);
+    if (user?.studentRollNo) {
+      loadRequests();
+    }
+  }, [user?.studentRollNo]);
 
   return (
     <>
@@ -527,6 +572,25 @@ function App() {
         <Route
           path="/login"
           element={<Login />}
+        />
+
+        <Route
+          path="/register"
+          element={<Register />}
+        />
+
+        <Route
+          path="/student-register"
+          element={<StudentRegister />}
+        />
+
+        <Route
+          path="/teacher-profile"
+          element={
+            <ProtectedRoute role="teacher">
+              <TeacherProfile />
+            </ProtectedRoute>
+          }
         />
 
         {/* ================================= */}

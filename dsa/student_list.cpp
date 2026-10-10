@@ -21,6 +21,7 @@ struct Student
     string year;
     double cgpa;
     string status;
+    int attendance;
 
     Student *next;
 
@@ -31,7 +32,8 @@ struct Student
         string department,
         string year,
         double cgpa,
-        string status = "Active")
+        string status = "Active",
+        int attendance = 0)
     {
         this->rollNo = rollNo;
         this->name = name;
@@ -40,6 +42,7 @@ struct Student
         this->year = year;
         this->cgpa = cgpa;
         this->status = status;
+        this->attendance = attendance;
         this->next = nullptr;
     }
 };
@@ -68,7 +71,8 @@ bool saveUndoOperation(
         << student.department << "|"
         << student.year << "|"
         << student.cgpa << "|"
-        << student.status
+        << student.status << "|"
+        << student.attendance
         << "\n";
 
     file.close();
@@ -107,6 +111,7 @@ bool loadUndoOperation(
     string year;
     string cgpa;
     string status;
+    string attendance;
 
     getline(ss, type, '|');
     getline(ss, rollNo, '|');
@@ -116,6 +121,7 @@ bool loadUndoOperation(
     getline(ss, year, '|');
     getline(ss, cgpa, '|');
     getline(ss, status, '|');
+    getline(ss, attendance, '|');
 
     student = Student(
         stoi(rollNo),
@@ -124,7 +130,8 @@ bool loadUndoOperation(
         department,
         year,
         stod(cgpa),
-        status);
+        status,
+        stoi(attendance));
 
     return true;
 }
@@ -258,7 +265,8 @@ public:
                 student.department,
                 student.year,
                 student.cgpa,
-                student.status);
+                student.status,
+                student.attendance);
 
         if (head == nullptr)
         {
@@ -309,6 +317,9 @@ public:
 
         student->status =
             oldStudent.status;
+
+        student->attendance =
+            oldStudent.attendance;
 
         return true;
     }
@@ -520,7 +531,8 @@ public:
         string department,
         string year,
         double cgpa,
-        string status = "Active")
+        string status = "Active",
+        int attendance = 0)
     {
 
         if (searchStudent(rollNo) != nullptr)
@@ -536,7 +548,8 @@ public:
                 department,
                 year,
                 cgpa,
-                status);
+                status,
+                attendance);
 
         if (head == nullptr)
         {
@@ -1033,7 +1046,8 @@ public:
         string email,
         string department,
         string year,
-        double cgpa)
+        double cgpa,
+        int attendance)
     {
 
         Student *student =
@@ -1052,6 +1066,7 @@ public:
         student->department = department;
         student->year = year;
         student->cgpa = cgpa;
+        student->attendance = attendance;
 
         pushOperation(
             "UPDATE",
@@ -1101,7 +1116,8 @@ public:
                 << current->department << "|"
                 << current->year << "|"
                 << current->cgpa << "|"
-                << current->status
+                << current->status << "|"
+                << current->attendance
                 << "\n";
 
             current = current->next;
@@ -1146,6 +1162,7 @@ public:
             string year;
             string cgpa;
             string status;
+            string attendance;
 
             getline(ss, rollNo, '|');
             getline(ss, name, '|');
@@ -1154,6 +1171,7 @@ public:
             getline(ss, year, '|');
             getline(ss, cgpa, '|');
             getline(ss, status, '|');
+            getline(ss, attendance, '|');
 
             insertStudent(
                 stoi(rollNo),
@@ -1162,7 +1180,8 @@ public:
                 department,
                 year,
                 stod(cgpa),
-                status);
+                status,
+                stoi(attendance));
         }
 
         file.close();
@@ -1526,6 +1545,8 @@ int main(int argc, char *argv[])
                 << "|"
                 << found->status
                 << "|"
+                << found->attendance
+                << "|"
                 << comparisons
                 << endl;
         }
@@ -1578,6 +1599,8 @@ int main(int argc, char *argv[])
                 << found->cgpa
                 << "|"
                 << found->status
+                << "|"
+                << found->attendance
                 << "|"
                 << comparisons
                 << endl;
@@ -1633,6 +1656,8 @@ int main(int argc, char *argv[])
                 << student->cgpa
                 << "|"
                 << student->status
+                << "|"
+                << student->attendance
                 << endl;
         }
 
@@ -1682,6 +1707,8 @@ int main(int argc, char *argv[])
                 << student->cgpa
                 << "|"
                 << student->status
+                << "|"
+                << student->attendance
                 << endl;
         }
 
@@ -1697,7 +1724,7 @@ int main(int argc, char *argv[])
     // ======================================
 
     if (
-        argc > 7 &&
+        argc > 8 &&
         string(argv[1]) == "add")
     {
 
@@ -1719,6 +1746,9 @@ int main(int argc, char *argv[])
         double cgpa =
             stod(argv[7]);
 
+        int attendance =
+            stoi(argv[8]);
+
         bool inserted =
             students.insertStudent(
                 rollNo,
@@ -1726,7 +1756,9 @@ int main(int argc, char *argv[])
                 email,
                 department,
                 year,
-                cgpa);
+                cgpa,
+                "Active",
+                attendance);
 
         if (!inserted)
         {
@@ -1809,7 +1841,7 @@ int main(int argc, char *argv[])
     // ======================================
 
     if (
-        argc > 7 &&
+        argc > 8 &&
         string(argv[1]) == "update")
     {
 
@@ -1831,6 +1863,9 @@ int main(int argc, char *argv[])
         double cgpa =
             stod(argv[7]);
 
+        int attendance =
+            stoi(argv[8]);
+
         bool updated =
             students.updateStudent(
                 rollNo,
@@ -1838,7 +1873,8 @@ int main(int argc, char *argv[])
                 email,
                 department,
                 year,
-                cgpa);
+                cgpa,
+                attendance);
 
         if (!updated)
         {

@@ -2,7 +2,9 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
-const { MongoClient } = require("mongodb");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const { MongoClient, ObjectId } = require("mongodb");
 const { execFile } = require("child_process");
 const path = require("path");
 const fs = require("fs/promises");
@@ -10,6 +12,11 @@ const fs = require("fs/promises");
 const app = express();
 
 const PORT = Number(process.env.PORT) || 5000;
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+    console.error("ERROR: JWT_SECRET is missing in .env");
+    process.exit(1);
+}
 
 const MONGO_URI = process.env.MONGO_URI;
 
@@ -49,8 +56,10 @@ let cppEngine = null;
 
 let db;
 let studentsCollection;
+let usersCollection;
 let undoCollection;
 let redoCollection;
+let requestsCollection;
 
 // ======================================================
 // EXPRESS
@@ -58,6 +67,283 @@ let redoCollection;
 
 app.use(cors());
 app.use(express.json());
+
+// ======================================================
+// AUTHENTICATION MIDDLEWARE
+// ======================================================
+
+function authenticateToken(req, res, next) {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(401).json({
+            success: false,
+            message: "Authentication required.",
+        });
+    }
+
+    const token = authHeader.split(" ")[1];
+
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+
+        req.user = decoded;
+
+        next();
+    } catch (error) {
+        return res.status(401).json({
+            success: false,
+            message: "Invalid or expired token.",
+        });
+    }
+}
+// ADD THIS BELOW authenticateToken
+
+function requireTeacher(req, res, next) {
+    if (req.user.role !== "teacher") {
+        return res.status(403).json({
+            success: false,
+            message: "Teacher access required.",
+        });
+    }
+
+    next();
+}
+
+function getDataOwnerId(req) {
+    if (req.user.role === "student") {
+        return req.user.teacherId;
+    }
+
+    return req.user.userId;
+}
+
+// ======================================================
+// TEACHER REGISTER
+// ======================================================
+
+app.post("/api/auth/register", async (req, res) => {
+    try {
+        const { name, email, password } = req.body;
+
+        if (!name || !email || !password) {
+            return res.status(400).json({
+                success: false,
+                message: "Name, email and password are required.",
+            });
+        }
+
+        const normalizedEmail = email.trim().toLowerCase();
+
+        const existingUser = await usersCollection.findOne({
+            email: normalizedEmail,
+        });
+
+        if (existingUser) {
+            return res.status(409).json({
+                success: false,
+                message: "User already exists.",
+            });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        const result = await usersCollection.insertOne({
+            name: name.trim(),
+            email: normalizedEmail,
+            password: hashedPassword,
+            role: "teacher",
+            createdAt: new Date(),
+        });
+
+        res.status(201).json({
+            success: true,
+            message: "Teacher registered successfully.",
+            userId: result.insertedId,
+        });
+
+    } catch (error) {
+        console.error("REGISTER ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Registration failed.",
+        });
+    }
+});
+
+
+// ===============================
+// STUDENT REGISTRATION
+// ===============================
+app.post("/api/auth/student-register", async (req, res) => {
+    try {
+        const { email, rollNo, password } = req.body;
+
+        if (!email || !rollNo || !password) {
+            return res.status(400).json({
+                success: false,
+                message: "Email, roll number and password are required.",
+            });
+        }
+
+        const normalizedEmail = email.trim().toLowerCase();
+        const numericRollNo = Number(rollNo);
+
+        if (!Number.isInteger(numericRollNo)) {
+            return res.status(400).json({
+                success: false,
+                message: "Roll number must be a valid number.",
+            });
+        }
+
+        if (password.length < 6) {
+            return res.status(400).json({
+                success: false,
+                message: "Password must be at least 6 characters.",
+            });
+        }
+
+        // Find the student created by a teacher
+        const student = await studentsCollection.findOne({
+            email: normalizedEmail,
+            rollNo: numericRollNo,
+        });
+
+        if (!student) {
+            return res.status(404).json({
+                success: false,
+                message:
+                    "Student record not found. Please contact your teacher.",
+            });
+        }
+
+        // Check whether account already exists
+        const existingUser = await usersCollection.findOne({
+            email: normalizedEmail,
+        });
+
+        if (existingUser) {
+            return res.status(409).json({
+                success: false,
+                message: "An account already exists with this email.",
+            });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        // IMPORTANT:
+        // teacherId comes directly from the student's existing record.
+        await usersCollection.insertOne({
+            name: student.name,
+            email: normalizedEmail,
+            password: hashedPassword,
+            role: "student",
+            studentRollNo: student.rollNo,
+            teacherId: student.teacherId,
+            createdAt: new Date(),
+        });
+
+        return res.status(201).json({
+            success: true,
+            message: "Student account created successfully.",
+        });
+    } catch (error) {
+        console.error("Student registration error:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Server error during student registration.",
+        });
+    }
+});
+
+// ======================================================
+// TEACHER LOGIN
+// ======================================================
+
+app.post("/api/auth/login", async (req, res) => {
+    try {
+        const { email, password } = req.body;
+
+        if (!email || !password) {
+            return res.status(400).json({
+                success: false,
+                message: "Email and password are required.",
+            });
+        }
+
+        const normalizedEmail = email.trim().toLowerCase();
+        const user = await usersCollection.findOne({
+            email: normalizedEmail,
+        });
+
+        if (!user) {
+            return res.status(401).json({
+                success: false,
+                message: "Invalid email or password.",
+            });
+        }
+
+        const passwordMatch = await bcrypt.compare(
+            password,
+            user.password
+        );
+
+        if (!passwordMatch) {
+            return res.status(401).json({
+                success: false,
+                message: "Invalid email or password.",
+            });
+        }
+
+        const token = jwt.sign(
+            {
+                userId: user._id.toString(),
+                email: user.email,
+                role: user.role,
+                ...(user.role === "student"
+                    ? {
+                        studentRollNo:
+                            Number(user.studentRollNo),
+                        teacherId: user.teacherId,
+                    }
+                    : {}),
+            },
+            JWT_SECRET,
+            {
+                expiresIn: "1d",
+            }
+        );
+
+        res.json({
+            success: true,
+            message: "Login successful.",
+            token,
+            user: {
+                id: user._id.toString(),
+                name: user.name,
+                email: user.email,
+                role: user.role,
+                ...(user.role === "student"
+                    ? {
+                        studentRollNo:
+                            Number(user.studentRollNo),
+                        teacherId: user.teacherId,
+                    }
+                    : {}),
+            },
+        });
+
+    } catch (error) {
+        console.error("LOGIN ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Login failed.",
+        });
+    }
+});
 
 // ======================================================
 // DATABASE CONNECTION
@@ -69,11 +355,21 @@ async function connectMongoDB() {
     db = mongoClient.db("datanest");
 
     studentsCollection = db.collection("students");
+    usersCollection = db.collection("users");
     undoCollection = db.collection("undo_history");
     redoCollection = db.collection("redo_history");
+    requestsCollection = db.collection("requests");
+    await requestsCollection.createIndex({
+        teacherId: 1,
+        createdAt: -1,
+    });
 
+    await requestsCollection.createIndex({
+        studentRollNo: 1,
+        teacherId: 1,
+    });
     await studentsCollection.createIndex(
-        { rollNo: 1 },
+        { teacherId: 1, rollNo: 1 },
         { unique: true }
     );
 
@@ -167,6 +463,7 @@ function studentToFileLine(student) {
         year,
         cgpa,
         status,
+        Number(student.attendance) || 0,
     ].join("|");
 }
 
@@ -178,7 +475,7 @@ function parseStudentLine(line) {
     const parts = String(line)
         .split("|");
 
-    if (parts.length < 7) {
+    if (parts.length < 8) {
         return null;
     }
 
@@ -196,6 +493,7 @@ function parseStudentLine(line) {
         year: parts[4] || "",
         cgpa: Number(parts[5]) || 0,
         status: parts[6] || "Active",
+        attendance: Number(parts[7]) || 0,
     };
 }
 
@@ -207,11 +505,13 @@ function parseStudentLine(line) {
 // students.txt is only the bridge for C++.
 // ======================================================
 
-async function syncMongoToCppFile() {
+async function syncMongoToCppFile(teacherId) {
     await ensureDsaDirectory();
 
     const students = await studentsCollection
-        .find({})
+        .find({
+            teacherId,
+        })
         .sort({ rollNo: 1 })
         .toArray();
 
@@ -235,7 +535,7 @@ async function syncMongoToCppFile() {
 // Server reads that state and updates MongoDB.
 // ======================================================
 
-async function syncCppFileToMongo() {
+async function syncCppFileToMongo(teacherId) {
     let content = "";
 
     try {
@@ -260,21 +560,117 @@ async function syncCppFileToMongo() {
         .map(parseStudentLine)
         .filter(Boolean);
 
-    // Replace MongoDB student collection
-    // with the state produced by C++.
 
-    await studentsCollection.deleteMany({});
+    const existingStudents =
+        await studentsCollection
+            .find({
+                teacherId,
+            })
+            .toArray();
+
+    const existingByRollNo =
+        new Map(
+            existingStudents.map(
+                (student) => [
+                    Number(student.rollNo),
+                    student,
+                ]
+            )
+        );
+
+    const parsedRollNos =
+        students.map(
+            (student) => Number(student.rollNo)
+        );
+
+    // ==================================================
+    // Remove students deleted by C++
+    // ==================================================
+
+    if (parsedRollNos.length === 0) {
+        await studentsCollection.deleteMany({
+            teacherId,
+        });
+    } else {
+        await studentsCollection.deleteMany({
+            teacherId,
+            rollNo: {
+                $nin: parsedRollNos,
+            },
+        });
+    }
+
+    // ==================================================
+    // Update / insert students
+    // ==================================================
 
     if (students.length > 0) {
-        await studentsCollection.insertMany(
-            students,
+        const operations = students.map(
+            (student) => ({
+                updateOne: {
+                    filter: {
+                        teacherId,
+                        rollNo: Number(
+                            student.rollNo
+                        ),
+                    },
+
+                    update: {
+                        $set: {
+                            rollNo: Number(
+                                student.rollNo
+                            ),
+
+                            name: student.name,
+                            email: student.email,
+                            department:
+                                student.department,
+
+                            year: student.year,
+
+                            cgpa: Number(
+                                student.cgpa
+                            ),
+
+                            status:
+                                student.status ||
+                                "Active",
+
+                            attendance: Number(student.attendance) || 0,
+
+                        },
+
+                        $setOnInsert: {
+                            teacherId,
+
+                        },
+                    },
+
+                    upsert: true,
+                },
+            })
+        );
+
+        await studentsCollection.bulkWrite(
+            operations,
             {
                 ordered: true,
             }
         );
     }
 
-    return students;
+    // ==================================================
+    // Return final MongoDB state
+    // ==================================================
+
+    return await studentsCollection
+        .find({
+            teacherId,
+        })
+        .sort({
+            rollNo: 1,
+        })
+        .toArray();
 }
 
 // ======================================================
@@ -423,10 +819,11 @@ function parseSearchOutput(
                     Number(parts[6]) || 0,
                 status:
                     parts[7] || "Active",
+                attendance: Number(parts[8]) || 0,
             },
 
             comparisons:
-                Number(parts[8]) || 0,
+                Number(parts[9]) || 0,
 
             algorithm,
         };
@@ -517,11 +914,13 @@ function parseSortOutput(
 // ======================================================
 
 async function saveUndoRecord(
+    teacherId,
     operation,
     beforeStudent,
     afterStudent = null
 ) {
     await undoCollection.insertOne({
+        teacherId,
         operation,
         beforeStudent,
         afterStudent,
@@ -529,7 +928,9 @@ async function saveUndoRecord(
     });
 
     // New operation invalidates redo history.
-    await redoCollection.deleteMany({});
+    await redoCollection.deleteMany({
+        teacherId,
+    });
 }
 
 // ======================================================
@@ -544,6 +945,8 @@ async function saveRedoRecord(
         createdAt: new Date(),
     });
 }
+
+
 
 // ======================================================
 // HEALTH
@@ -578,16 +981,25 @@ app.get(
 // ======================================================
 
 app.get(
-    "/api/students",
+    "/api/students", authenticateToken,
     async (req, res) => {
         try {
-            const students =
-                await studentsCollection
-                    .find({})
-                    .sort({
-                        rollNo: 1,
-                    })
-                    .toArray();
+            const filter =
+                req.user.role === "student"
+                    ? {
+                        rollNo:
+                            Number(req.user.studentRollNo),
+                        teacherId: req.user.teacherId,
+                    }
+                    : {
+                        teacherId:
+                            req.user.userId,
+                    };
+
+            const students = await studentsCollection
+                .find(filter)
+                .sort({ rollNo: 1 })
+                .toArray();
 
             res.json({
                 success: true,
@@ -610,6 +1022,369 @@ app.get(
     }
 );
 
+// ===============================
+// PROFILE
+// ===============================
+app.get("/api/profile", authenticateToken, async (req, res) => {
+    try {
+        // ===========================
+        // TEACHER PROFILE
+        // ===========================
+        if (req.user.role === "teacher") {
+            const teacher = await usersCollection.findOne(
+                {
+                    _id: new ObjectId(req.user.userId),
+                },
+                {
+                    projection: {
+                        password: 0,
+                    },
+                }
+            );
+
+            if (!teacher) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Teacher profile not found.",
+                });
+            }
+
+            const studentCount =
+                await studentsCollection.countDocuments({
+                    teacherId: req.user.userId,
+                });
+
+            return res.json({
+                success: true,
+                profile: {
+                    name: teacher.name,
+                    email: teacher.email,
+                    role: teacher.role,
+                    teacherId: teacher._id,
+                    studentCount,
+                    createdAt: teacher.createdAt,
+                },
+            });
+        }
+
+        // ===========================
+        // STUDENT PROFILE
+        // ===========================
+        const student = await studentsCollection.findOne({
+            rollNo: Number(req.user.studentRollNo),
+            teacherId: req.user.teacherId,
+        });
+
+        if (!student) {
+            return res.status(404).json({
+                success: false,
+                message: "Student profile not found.",
+            });
+        }
+
+        const teacher = await usersCollection.findOne(
+            {
+                _id: new ObjectId(student.teacherId),
+                role: "teacher",
+            },
+            {
+                projection: {
+                    password: 0,
+                },
+            }
+        );
+
+        return res.json({
+            success: true,
+            profile: {
+                name: student.name,
+                email: student.email,
+                rollNo: student.rollNo,
+                department: student.department,
+                year: student.year,
+                cgpa: student.cgpa,
+                attendance: student.attendance ?? 0,
+
+                // Teacher information
+                teacherName: teacher?.name || "Not assigned",
+                teacherEmail: teacher?.email || "",
+            },
+        });
+    } catch (error) {
+        console.error("Profile error:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Unable to load profile.",
+        });
+    }
+});
+
+// ======================================================
+// STUDENT SEND SERVICE REQUEST
+// Request automatically goes to student's assigned teacher
+// ======================================================
+
+// ======================================================
+// STUDENT -> SEND SERVICE REQUEST
+// ======================================================
+app.post(
+    "/api/requests",
+    authenticateToken,
+    async (req, res) => {
+        try {
+            if (req.user.role !== "student") {
+                return res.status(403).json({
+                    success: false,
+                    message: "Only students can send requests.",
+                });
+            }
+
+            const { requestType, message } = req.body;
+
+            if (!requestType || !message || !message.trim()) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Request type and message are required.",
+                });
+            }
+
+            // Find the logged-in student's real MongoDB record
+            const student = await studentsCollection.findOne({
+                rollNo: Number(req.user.studentRollNo),
+                teacherId: req.user.teacherId,
+            });
+
+            if (!student) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Student record not found.",
+                });
+            }
+
+            // Get the teacher assigned to this student
+            const teacher = await usersCollection.findOne({
+                _id: new ObjectId(student.teacherId),
+                role: "teacher",
+            });
+
+            if (!teacher) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Assigned teacher not found.",
+                });
+            }
+
+            const request = {
+                studentRollNo: Number(student.rollNo),
+                studentName: student.name,
+                studentEmail: student.email,
+
+                teacherId: student.teacherId,
+                teacherName: teacher.name,
+                teacherEmail: teacher.email,
+
+                requestType: requestType.trim(),
+                message: message.trim(),
+
+                status: "Pending",
+                createdAt: new Date(),
+            };
+
+            const result = await requestsCollection.insertOne(request);
+
+            res.status(201).json({
+                success: true,
+                message: "Request sent to your teacher successfully.",
+                request: {
+                    _id: result.insertedId,
+                    ...request,
+                },
+            });
+
+        } catch (error) {
+            console.error("CREATE REQUEST ERROR:", error);
+
+            res.status(500).json({
+                success: false,
+                message: "Failed to send request.",
+            });
+        }
+    }
+);
+
+// ======================================================
+// GET MY REQUESTS
+// Student can see only their own requests
+// ======================================================
+
+app.get(
+    "/api/my-requests",
+    authenticateToken,
+    async (req, res) => {
+        try {
+            if (req.user.role !== "student") {
+                return res.status(403).json({
+                    success: false,
+                    message:
+                        "Student access required.",
+                });
+            }
+
+            const requests =
+                await requestsCollection
+                    .find({
+                        studentRollNo:
+                            Number(
+                                req.user.studentRollNo
+                            ),
+
+                        teacherId:
+                            req.user.teacherId,
+                    })
+                    .sort({
+                        createdAt: -1,
+                    })
+                    .toArray();
+
+            return res.json({
+                success: true,
+                requests,
+            });
+
+        } catch (error) {
+            console.error(
+                "GET MY REQUESTS ERROR:",
+                error
+            );
+
+            return res.status(500).json({
+                success: false,
+                message:
+                    "Failed to load your requests.",
+            });
+        }
+    }
+);
+
+// ======================================================
+// GET TEACHER REQUESTS
+// Teacher can see only requests sent to that teacher
+// ======================================================
+
+// ======================================================
+// TEACHER -> GET ONLY THEIR STUDENTS' REQUESTS
+// ======================================================
+app.get(
+    "/api/requests",
+    authenticateToken,
+    requireTeacher,
+    async (req, res) => {
+        try {
+            const requests = await requestsCollection
+                .find({
+                    teacherId: req.user.userId,
+                })
+                .sort({
+                    createdAt: -1,
+                })
+                .toArray();
+
+            res.json({
+                success: true,
+                count: requests.length,
+                requests,
+            });
+
+        } catch (error) {
+            console.error("GET REQUESTS ERROR:", error);
+
+            res.status(500).json({
+                success: false,
+                message: "Failed to load requests.",
+            });
+        }
+    }
+);
+
+// ======================================================
+// TEACHER -> UPDATE REQUEST STATUS
+// Teacher can update only their own student's request
+// ======================================================
+
+app.put(
+    "/api/requests/:id/status",
+    authenticateToken,
+    requireTeacher,
+    async (req, res) => {
+        try {
+            const { id } = req.params;
+            const { status } = req.body;
+
+            if (!ObjectId.isValid(id)) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Invalid request ID.",
+                });
+            }
+
+            if (
+                !["Pending", "Approved", "Rejected"].includes(
+                    status
+                )
+            ) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Invalid request status.",
+                });
+            }
+
+            const result =
+                await requestsCollection.updateOne(
+                    {
+                        _id: new ObjectId(id),
+
+                        // IMPORTANT:
+                        // Only the assigned teacher can update it
+                        teacherId: req.user.userId,
+                    },
+                    {
+                        $set: {
+                            status,
+                            updatedAt: new Date(),
+                        },
+                    }
+                );
+
+            if (result.matchedCount === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message:
+                        "Request not found or you are not authorized to update it.",
+                });
+            }
+
+            return res.json({
+                success: true,
+                message:
+                    `Request ${status.toLowerCase()} successfully.`,
+            });
+
+        } catch (error) {
+            console.error(
+                "UPDATE REQUEST STATUS ERROR:",
+                error
+            );
+
+            return res.status(500).json({
+                success: false,
+                message:
+                    "Failed to update request status.",
+            });
+        }
+    }
+);
+
 // ======================================================
 // ADD STUDENT
 //
@@ -620,7 +1395,8 @@ app.get(
 // ======================================================
 
 app.post(
-    "/api/students",
+    "/api/students", authenticateToken,
+    requireTeacher,
     async (req, res) => {
         const {
             rollNo,
@@ -629,6 +1405,7 @@ app.post(
             department,
             year,
             cgpa,
+            attendance,
         } = req.body;
 
         if (
@@ -655,6 +1432,7 @@ app.post(
 
         const numericCgpa =
             Number(cgpa);
+        const numericAttendance = Number(attendance);
 
         if (
             Number.isNaN(
@@ -671,14 +1449,23 @@ app.post(
             });
         }
 
+        if (
+            Number.isNaN(numericAttendance) ||
+            numericAttendance < 0 ||
+            numericAttendance > 100
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "Attendance must be between 0 and 100.",
+            });
+        }
+
         try {
             const existing =
-                await studentsCollection.findOne(
-                    {
-                        rollNo:
-                            numericRollNo,
-                    }
-                );
+                await studentsCollection.findOne({
+                    rollNo: numericRollNo,
+                    teacherId: req.user.userId,
+                });
 
             if (existing) {
                 return res.status(409).json({
@@ -689,7 +1476,7 @@ app.post(
             }
 
             // Sync real MongoDB state into C++ file.
-            await syncMongoToCppFile();
+            await syncMongoToCppFile(getDataOwnerId(req));
 
             const cpp =
                 await runCpp([
@@ -700,6 +1487,7 @@ app.post(
                     department,
                     year,
                     numericCgpa,
+                    numericAttendance,
                 ]);
 
             if (
@@ -724,43 +1512,42 @@ app.post(
                 });
             }
 
-            if (
-                !cpp.output.includes(
-                    "STUDENT_ADDED"
-                )
-            ) {
+            if (!cpp.output.includes("STUDENT_ADDED")) {
                 throw new Error(
                     "Unexpected C++ ADD response: " +
                     cpp.output
                 );
             }
 
-            // C++ is now authoritative for
-            // the operation result.
+            // C++ -> students.txt -> MongoDB
             const syncedStudents =
-                await syncCppFileToMongo();
+                await syncCppFileToMongo(req.user.userId);
 
+            // Find the student that was actually added
             const addedStudent =
                 syncedStudents.find(
                     (student) =>
-                        student.rollNo ===
-                        numericRollNo
+                        student.rollNo === numericRollNo
                 );
 
-            // Save history in Mongo for UI/history.
+            if (addedStudent) {
+                addedStudent.teacherId = req.user.userId;
+            }
+
+            // Save history in Mongo
             await saveUndoRecord(
+                req.user.userId,
                 "ADD",
                 null,
                 addedStudent
             );
 
-            res.status(201).json({
+            return res.status(201).json({
                 success: true,
-                message:
-                    "Student added successfully.",
-                student:
-                    addedStudent || null,
+                message: "Student added successfully.",
+                student: addedStudent || null,
             });
+
         } catch (error) {
             console.error(
                 "ADD STUDENT ERROR:",
@@ -784,11 +1571,10 @@ app.post(
 
 app.put(
     "/api/students/:rollNo",
+    authenticateToken,
+    requireTeacher,
     async (req, res) => {
-        const rollNo =
-            Number(
-                req.params.rollNo
-            );
+        const rollNo = Number(req.params.rollNo);
 
         const {
             name,
@@ -796,15 +1582,13 @@ app.put(
             department,
             year,
             cgpa,
+            attendance,
         } = req.body;
 
-        if (
-            Number.isNaN(rollNo)
-        ) {
+        if (Number.isNaN(rollNo)) {
             return res.status(400).json({
                 success: false,
-                message:
-                    "Invalid roll number.",
+                message: "Invalid roll number.",
             });
         }
 
@@ -813,63 +1597,80 @@ app.put(
             !email ||
             !department ||
             !year ||
-            cgpa === undefined
+            cgpa === undefined ||
+            attendance === undefined
         ) {
             return res.status(400).json({
                 success: false,
-                message:
-                    "All student fields are required.",
+                message: "All student fields are required.",
             });
         }
 
-        const numericCgpa =
-            Number(cgpa);
+        const numericCgpa = Number(cgpa);
+        const numericAttendance = Number(attendance);
 
         if (
-            Number.isNaN(
-                numericCgpa
-            )
+            Number.isNaN(numericCgpa) ||
+            numericCgpa < 0 ||
+            numericCgpa > 10
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "CGPA must be between 0 and 10.",
+            });
+        }
+
+        if (
+            Number.isNaN(numericAttendance) ||
+            numericAttendance < 0 ||
+            numericAttendance > 100
         ) {
             return res.status(400).json({
                 success: false,
                 message:
-                    "CGPA must be numeric.",
+                    "Attendance must be between 0 and 100.",
             });
         }
 
         try {
+            // -----------------------------------------
+            // 1. Get old MongoDB record
+            // -----------------------------------------
             const before =
-                await studentsCollection.findOne(
-                    {
-                        rollNo,
-                    }
-                );
+                await studentsCollection.findOne({
+                    rollNo,
+                    teacherId: req.user.userId,
+                });
 
             if (!before) {
                 return res.status(404).json({
                     success: false,
-                    message:
-                        "Student not found.",
+                    message: "Student not found.",
                 });
             }
 
-            await syncMongoToCppFile();
+            // -----------------------------------------
+            // 2. Sync MongoDB student data to C++
+            // -----------------------------------------
+            await syncMongoToCppFile(
+                getDataOwnerId(req)
+            );
 
-            const cpp =
-                await runCpp([
-                    "update",
-                    rollNo,
-                    name,
-                    email,
-                    department,
-                    year,
-                    numericCgpa,
-                ]);
-
-            if (
-                cpp.output ===
-                "NOT_FOUND"
-            ) {
+            // -----------------------------------------
+            // 3. Update academic information through C++
+            //    Attendance is NOT sent to C++
+            // -----------------------------------------
+            const cpp = await runCpp([
+                "update",
+                rollNo,
+                name,
+                email,
+                department,
+                year,
+                numericCgpa,
+                numericAttendance,
+            ]);
+            if (cpp.output === "NOT_FOUND") {
                 return res.status(404).json({
                     success: false,
                     message:
@@ -877,10 +1678,7 @@ app.put(
                 });
             }
 
-            if (
-                cpp.output ===
-                "SAVE_FAILED"
-            ) {
+            if (cpp.output === "SAVE_FAILED") {
                 return res.status(500).json({
                     success: false,
                     message:
@@ -888,40 +1686,51 @@ app.put(
                 });
             }
 
-            if (
-                !cpp.output.includes(
-                    "STUDENT_UPDATED"
-                )
-            ) {
+            if (!cpp.output.includes("STUDENT_UPDATED")) {
                 throw new Error(
                     "Unexpected C++ UPDATE response: " +
                     cpp.output
                 );
             }
 
-            const syncedStudents =
-                await syncCppFileToMongo();
+            // -----------------------------------------
+            // 4. Sync C++ academic data back to MongoDB
+            // -----------------------------------------
+            await syncCppFileToMongo(
+                req.user.userId
+            );
 
+
+
+            // -----------------------------------------
+            // 6. Get FINAL updated MongoDB record
+            // -----------------------------------------
             const after =
-                syncedStudents.find(
-                    (student) =>
-                        student.rollNo ===
-                        rollNo
-                );
+                await studentsCollection.findOne({
+                    rollNo,
+                    teacherId: req.user.userId,
+                });
 
+            // -----------------------------------------
+            // 7. Save undo record
+            // -----------------------------------------
             await saveUndoRecord(
+                req.user.userId,
                 "UPDATE",
                 before,
                 after
             );
 
+            // -----------------------------------------
+            // 8. Send final record to frontend
+            // -----------------------------------------
             res.json({
                 success: true,
                 message:
                     "Student updated successfully.",
-                student:
-                    after || null,
+                student: after,
             });
+
         } catch (error) {
             console.error(
                 "UPDATE STUDENT ERROR:",
@@ -932,8 +1741,131 @@ app.put(
                 success: false,
                 message:
                     "Failed to update student.",
-                error:
-                    error.message,
+                error: error.message,
+            });
+        }
+    }
+);
+
+
+// ======================================================
+// UPDATE STUDENT ATTENDANCE
+// MongoDB owns attendance.
+// C++ is NOT involved.
+// ======================================================
+
+app.put(
+    "/api/students/:rollNo/attendance",
+    authenticateToken,
+    requireTeacher,
+    async (req, res) => {
+        const rollNo = Number(req.params.rollNo);
+        const attendance = Number(req.body.attendance);
+
+        if (Number.isNaN(rollNo)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid roll number.",
+            });
+        }
+
+        if (
+            Number.isNaN(attendance) ||
+            attendance < 0 ||
+            attendance > 100
+        ) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Attendance must be between 0 and 100.",
+            });
+        }
+
+        try {
+            const student =
+                await studentsCollection.findOne({
+                    rollNo,
+                    teacherId: req.user.userId,
+                });
+
+            if (!student) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Student not found.",
+                });
+            }
+
+            await syncMongoToCppFile(
+                req.user.userId
+            );
+
+            const cpp = await runCpp([
+                "update",
+                rollNo,
+                student.name,
+                student.email,
+                student.department,
+                student.year,
+                student.cgpa,
+                attendance,
+            ]);
+
+            if (cpp.output === "NOT_FOUND") {
+                return res.status(404).json({
+                    success: false,
+                    message: "C++ could not find student.",
+                });
+            }
+
+            if (cpp.output === "SAVE_FAILED") {
+                return res.status(500).json({
+                    success: false,
+                    message: "C++ could not save students.txt.",
+                });
+            }
+
+            if (!cpp.output.includes("STUDENT_UPDATED")) {
+                throw new Error(
+                    "Unexpected C++ UPDATE response: " +
+                    cpp.output
+                );
+            }
+
+            await syncCppFileToMongo(
+                req.user.userId
+            );
+
+            const updatedStudent =
+                await studentsCollection.findOne({
+                    rollNo,
+                    teacherId: req.user.userId,
+                });
+
+            if (result.matchedCount === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Student not found.",
+                });
+            }
+
+
+            res.json({
+                success: true,
+                message:
+                    "Attendance updated successfully.",
+                student: updatedStudent,
+            });
+        } catch (error) {
+            console.error(
+                "UPDATE ATTENDANCE ERROR:",
+                error
+            );
+
+            res.status(500).json({
+                success: false,
+                message:
+                    "Failed to update attendance.",
+                error: error.message,
             });
         }
     }
@@ -944,7 +1876,8 @@ app.put(
 // ======================================================
 
 app.delete(
-    "/api/students/:rollNo",
+    "/api/students/:rollNo", authenticateToken,
+    requireTeacher,
     async (req, res) => {
         const rollNo =
             Number(
@@ -966,6 +1899,7 @@ app.delete(
                 await studentsCollection.findOne(
                     {
                         rollNo,
+                        teacherId: req.user.userId,
                     }
                 );
 
@@ -977,7 +1911,7 @@ app.delete(
                 });
             }
 
-            await syncMongoToCppFile();
+            await syncMongoToCppFile(getDataOwnerId(req));
 
             const cpp =
                 await runCpp([
@@ -1018,9 +1952,12 @@ app.delete(
                 );
             }
 
-            await syncCppFileToMongo();
+            await syncCppFileToMongo(
+                req.user.userId
+            );
 
             await saveUndoRecord(
+                req.user.userId,
                 "DELETE",
                 before,
                 null
@@ -1056,6 +1993,7 @@ app.delete(
 
 app.get(
     "/api/search/linear/:rollNo",
+    authenticateToken,
     async (req, res) => {
         const rollNo =
             Number(
@@ -1072,8 +2010,21 @@ app.get(
             });
         }
 
+        if (
+            req.user.role === "student" &&
+            rollNo !== Number(req.user.studentRollNo)
+        ) {
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Students can only search their own record.",
+            });
+        }
+
         try {
-            await syncMongoToCppFile();
+            await syncMongoToCppFile(
+                getDataOwnerId(req)
+            );
 
             const cpp =
                 await runCpp([
@@ -1117,6 +2068,7 @@ app.get(
 
 app.get(
     "/api/search/binary/:rollNo",
+    authenticateToken,
     async (req, res) => {
         const rollNo =
             Number(
@@ -1133,8 +2085,21 @@ app.get(
             });
         }
 
+        if (
+            req.user.role === "student" &&
+            rollNo !== Number(req.user.studentRollNo)
+        ) {
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Students can only search their own record.",
+            });
+        }
+
         try {
-            await syncMongoToCppFile();
+            await syncMongoToCppFile(
+                getDataOwnerId(req)
+            );
 
             const cpp =
                 await runCpp([
@@ -1178,6 +2143,7 @@ app.get(
 
 app.get(
     "/api/search/compare/:rollNo",
+    authenticateToken,
     async (req, res) => {
         const rollNo =
             Number(
@@ -1194,8 +2160,21 @@ app.get(
             });
         }
 
+        if (
+            req.user.role === "student" &&
+            rollNo !== Number(req.user.studentRollNo)
+        ) {
+            return res.status(403).json({
+                success: false,
+                message:
+                    "Students can only search their own record.",
+            });
+        }
+
         try {
-            await syncMongoToCppFile();
+            await syncMongoToCppFile(
+                getDataOwnerId(req)
+            );
 
             const [
                 linearCpp,
@@ -1271,9 +2250,11 @@ app.get(
 
 app.get(
     "/api/sort/insertion",
+    authenticateToken,
+    requireTeacher,
     async (req, res) => {
         try {
-            await syncMongoToCppFile();
+            await syncMongoToCppFile(getDataOwnerId(req));
 
             const cpp =
                 await runCpp([
@@ -1310,10 +2291,11 @@ app.get(
 // ======================================================
 
 app.get(
-    "/api/sort/merge",
+    "/api/sort/merge", authenticateToken,
+    requireTeacher,
     async (req, res) => {
         try {
-            await syncMongoToCppFile();
+            await syncMongoToCppFile(getDataOwnerId(req));
 
             const cpp =
                 await runCpp([
@@ -1350,10 +2332,10 @@ app.get(
 // ======================================================
 
 app.get(
-    "/api/sort/compare",
+    "/api/sort/compare", authenticateToken, requireTeacher,
     async (req, res) => {
         try {
-            await syncMongoToCppFile();
+            await syncMongoToCppFile(getDataOwnerId(req));
 
             const [
                 insertionCpp,
@@ -1423,13 +2405,29 @@ app.get(
 // ======================================================
 
 app.get(
-    "/api/stack/test",
+    "/api/stack/test", authenticateToken, requireTeacher,
     async (req, res) => {
         try {
-            await syncMongoToCppFile();
+
+            // Get the latest undo record BEFORE C++ changes the data
+            const latestUndo =
+                await undoCollection.findOne(
+                    {
+                        teacherId:
+                            req.user.userId,
+                    },
+                    {
+                        sort: {
+                            createdAt: -1,
+                        },
+                    }
+                );
+            await syncMongoToCppFile(getDataOwnerId(req));
 
             const beforeCount =
-                await studentsCollection.countDocuments();
+                await studentsCollection.countDocuments({
+                    teacherId: req.user.userId,
+                });
 
             const cpp =
                 await runCpp([
@@ -1459,7 +2457,8 @@ app.get(
             }
 
             const afterStudents =
-                await syncCppFileToMongo();
+                await syncCppFileToMongo(req.user.userId);
+
 
             const lines =
                 cpp.output.split("|");
@@ -1506,9 +2505,27 @@ app.get(
 
 app.post(
     "/api/undo",
+    authenticateToken, requireTeacher,
     async (req, res) => {
         try {
-            await syncMongoToCppFile();
+
+            // Get the latest undo record BEFORE C++ changes the data
+            const latestUndo =
+                await undoCollection.findOne(
+                    {
+                        teacherId:
+                            req.user.userId,
+                    },
+                    {
+                        sort: {
+                            createdAt: -1,
+                        },
+                    }
+                );
+
+            await syncMongoToCppFile(
+                getDataOwnerId(req)
+            );
 
             const cpp =
                 await runCpp([
@@ -1560,22 +2577,18 @@ app.post(
             const studentName =
                 parts[3] || "";
 
-            await syncCppFileToMongo();
+            await syncCppFileToMongo(
+                req.user.userId
+            );
 
-            // Move latest Mongo history record
-            // to redo history.
-            const latestUndo =
-                await undoCollection.findOne(
-                    {},
-                    {
-                        sort: {
-                            createdAt: -1,
-                        },
-                    }
-                );
+
+
+
 
             if (latestUndo) {
                 await saveRedoRecord({
+                    teacherId:
+                        req.user.userId,
                     operation:
                         latestUndo.operation,
                     beforeStudent:
@@ -1620,10 +2633,27 @@ app.post(
 // ======================================================
 
 app.post(
-    "/api/redo",
+    "/api/redo", authenticateToken, requireTeacher,
     async (req, res) => {
         try {
-            await syncMongoToCppFile();
+
+            // Get the latest redo record BEFORE C++ changes the data
+            const latestRedo =
+                await redoCollection.findOne(
+                    {
+                        teacherId:
+                            req.user.userId,
+                    },
+                    {
+                        sort: {
+                            createdAt: -1,
+                        },
+                    }
+                );
+
+            await syncMongoToCppFile(
+                getDataOwnerId(req)
+            );
 
             const cpp =
                 await runCpp([
@@ -1675,20 +2705,27 @@ app.post(
             const studentName =
                 parts[3] || "";
 
-            await syncCppFileToMongo();
+            await syncCppFileToMongo(
+                req.user.userId
+            );
 
-            const latestRedo =
-                await redoCollection.findOne(
-                    {},
-                    {
-                        sort: {
-                            createdAt: -1,
-                        },
-                    }
+            // Restore MongoDB-owned attendance when Redo
+            // recreates a student that C++ does not store completely.
+            if (
+                latestRedo &&
+                latestRedo.operation === "ADD" &&
+                latestRedo.afterStudent
+            ) {
+                await restoreMongoOwnedFields(
+                    req.user.userId,
+                    latestRedo.afterStudent
                 );
+            }
 
             if (latestRedo) {
                 await undoCollection.insertOne({
+                    teacherId:
+                        req.user.userId,
                     operation:
                         latestRedo.operation,
                     beforeStudent:
@@ -1737,98 +2774,103 @@ app.post(
 // students.txt, then performs FIFO operations.
 // ======================================================
 
+// ======================================================
+// QUEUE TEST
+// C++ Queue + MongoDB persistent dequeue
+// ======================================================
+
 app.get(
     "/api/queue/test",
+    authenticateToken,
     async (req, res) => {
         try {
-            await syncMongoToCppFile();
+            const teacherId = getDataOwnerId(req);
 
-            const cpp =
-                await runCpp([
-                    "queue-test",
-                ]);
+            // 1. MongoDB students -> students.txt
+            await syncMongoToCppFile(teacherId);
 
-            const lines =
-                String(cpp.output)
-                    .split(/\r?\n/)
-                    .filter(Boolean);
+            // 2. Run original C++ queue implementation
+            const cpp = await runCpp([
+                "queue-test",
+            ]);
 
-            const sizes =
-                lines
-                    .filter(
-                        (line) =>
-                            line.startsWith(
-                                "QUEUE_SIZE|"
-                            )
-                    )
-                    .map(
-                        (line) =>
-                            Number(
-                                line.split("|")[1]
-                            ) || 0
-                    );
+            const lines = String(cpp.output)
+                .split(/\r?\n/)
+                .filter(Boolean);
 
-            const front =
-                lines.find(
-                    (line) =>
-                        line.startsWith(
-                            "FRONT|"
-                        )
+            // 3. Read C++ queue result
+            const sizes = lines
+                .filter((line) =>
+                    line.startsWith("QUEUE_SIZE|")
+                )
+                .map((line) =>
+                    Number(line.split("|")[1]) || 0
                 );
 
-            const dequeue =
-                lines.find(
-                    (line) =>
-                        line.startsWith(
-                            "DEQUEUE|"
-                        )
-                );
+            const front = lines.find((line) =>
+                line.startsWith("FRONT|")
+            );
 
-            const frontParts =
-                front
-                    ? front.split("|")
-                    : [];
+            const dequeue = lines.find((line) =>
+                line.startsWith("DEQUEUE|")
+            );
 
-            const dequeueParts =
-                dequeue
-                    ? dequeue.split("|")
-                    : [];
+            const frontParts = front
+                ? front.split("|")
+                : [];
 
+            const dequeueParts = dequeue
+                ? dequeue.split("|")
+                : [];
+
+            const dequeuedRollNo =
+                Number(dequeueParts[1]) || 0;
+
+            const dequeuedStudent =
+                dequeueParts[2] || "";
+
+            // 4. IMPORTANT:
+            // C++ queue-test has already removed the front student
+            // from students.txt.
+            // Now persist that exact result back to MongoDB.
+            const syncedStudents =
+                await syncCppFileToMongo(teacherId);
+
+            // 5. Return same visualization data to frontend
             res.json({
                 success: true,
-                dataStructure:
-                    "Queue",
-                principle:
-                    "FIFO",
+
+                dataStructure: "Queue",
+
+                principle: "FIFO",
 
                 initialSize:
                     sizes[0] || 0,
 
                 finalSize:
-                    sizes[1] || 0,
+                    syncedStudents.length,
 
                 frontRollNo:
-                    Number(
-                        frontParts[1]
-                    ) || 0,
+                    Number(frontParts[1]) || 0,
 
                 frontStudent:
                     frontParts[2] || "",
 
-                dequeuedRollNo:
-                    Number(
-                        dequeueParts[1]
-                    ) || 0,
+                dequeuedRollNo,
 
-                dequeuedStudent:
-                    dequeueParts[2] || "",
+                dequeuedStudent,
+
+                persisted: true,
+                remainingStudents:
+                    syncedStudents,
 
                 source:
-                    "MongoDB -> students.txt -> student_list.cpp",
+                    "MongoDB -> students.txt -> student_list.cpp -> MongoDB",
             });
+
         } catch (error) {
             console.error(
-                "QUEUE ERROR:",
+                "QUEUE TEST ERROR:",
                 error
             );
 
@@ -1836,12 +2878,12 @@ app.get(
                 success: false,
                 message:
                     "Queue operation failed.",
-                error:
-                    error.message,
+                error: error.message,
             });
         }
     }
 );
+
 
 // ======================================================
 // SINGLY LINKED LIST
@@ -1850,10 +2892,10 @@ app.get(
 // ======================================================
 
 app.get(
-    "/api/linked-list/test",
+    "/api/linked-list/test", authenticateToken,
     async (req, res) => {
         try {
-            await syncMongoToCppFile();
+            await syncMongoToCppFile(getDataOwnerId(req));
 
             const cpp =
                 await runCpp([
@@ -1985,7 +3027,7 @@ app.get(
 // ======================================================
 
 app.get(
-    "/api/doubly-linked-list/test",
+    "/api/doubly-linked-list/test", authenticateToken,
     async (req, res) => {
         try {
             // We still synchronize the real Mongo data
@@ -1993,7 +3035,7 @@ app.get(
             // doubly-linked-list-test command itself
             // creates its own demo nodes.
 
-            await syncMongoToCppFile();
+            await syncMongoToCppFile(getDataOwnerId(req));
 
             const cpp =
                 await runCpp([
@@ -2242,7 +3284,9 @@ async function startServer() {
         // On startup, MongoDB is the source of truth.
         // Do NOT allow old students.txt data to overwrite
         // MongoDB.
-        await syncMongoToCppFile();
+        // await syncMongoToCppFile();
+        // MongoDB -> students.txt synchronization happens
+        // when an authenticated teacher/student performs a DSA operation.
 
         app.listen(
             PORT,

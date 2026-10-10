@@ -1,4 +1,4 @@
-import API_URL from "../config/api";
+import { apiFetch } from "../config/api";
 import { useState } from "react";
 import {
     ListOrdered,
@@ -18,8 +18,8 @@ function Queue() {
             setError("");
             setResult(null);
 
-            const response = await fetch(
-                `${API_URL}/api/queue/test`
+            const response = await apiFetch(
+                `/api/queue/test`
             );
 
             const data = await response.json();

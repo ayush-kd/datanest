@@ -3065,3 +3065,17 @@ td {
     flex-wrap: wrap;
   }
 }
+
+.table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.table-wrapper table {
+  width: 100%;
+  min-width: 900px;
+}
+.table-wrapper th,
+.table-wrapper td {
+  white-space: nowrap;
+}

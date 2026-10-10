@@ -5,48 +5,114 @@ import {
   Send,
 } from "lucide-react";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { apiFetch } from "../config/api";
 import { useAuth } from "../context/AuthContext";
 import StatCard from "../components/StatCard";
 
 function StudentDashboard() {
   const { user } = useAuth();
+  const [student, setStudent] = useState(null);
+  const [studentLoading, setStudentLoading] = useState(true);
+
+  useEffect(() => {
+    const loadStudent = async () => {
+      try {
+        setStudentLoading(true);
+
+        const response = await apiFetch("/api/students");
+        const result = await response.json();
+
+        if (!response.ok || !result.success) {
+          throw new Error(
+            result.message || "Failed to load student data."
+          );
+        }
+
+        const students = Array.isArray(result.students)
+          ? result.students
+          : [];
+
+        const myStudent =
+          students.find(
+            (item) =>
+              Number(item.rollNo) ===
+              Number(user?.studentRollNo)
+          ) || students[0];
+
+        setStudent(myStudent || null);
+      } catch (error) {
+        console.error(
+          "Student dashboard API error:",
+          error
+        );
+        setStudent(null);
+      } finally {
+        setStudentLoading(false);
+      }
+    };
+
+    if (user?.studentRollNo) {
+      loadStudent();
+    }
+  }, [user?.studentRollNo]);
+
   const [requestType, setRequestType] = useState("Bonafide Certificate");
   const [message, setMessage] = useState("");
   const [success, setSuccess] = useState(false);
+  const [requestLoading, setRequestLoading] = useState(false);
 
-  const submitRequest = (e) => {
+  const submitRequest = async (e) => {
     e.preventDefault();
 
     if (!message.trim()) {
+      alert("Please enter your request message.");
       return;
     }
 
-    const newRequest = {
-      id: Date.now(),
-      student: user?.name || "Student",
-      rollNo: user?.rollNo || null,
-      email: user?.email || "",
-      type: requestType,
-      message: message.trim(),
-      status: "Pending",
-      createdAt: new Date().toLocaleString(),
-    };
-
-    const existingRequests =
-      JSON.parse(localStorage.getItem("studentRequests")) || [];
-
-    localStorage.setItem(
-      "studentRequests",
-      JSON.stringify([...existingRequests, newRequest])
-    );
-
-    setMessage("");
-    setSuccess(true);
-
-    setTimeout(() => {
+    try {
+      setRequestLoading(true);
       setSuccess(false);
-    }, 3000);
+
+      const response = await apiFetch("/api/requests", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          requestType,
+          message: message.trim(),
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        throw new Error(
+          data.message || "Failed to send request."
+        );
+      }
+
+      setMessage("");
+      setSuccess(true);
+
+      setTimeout(() => {
+        setSuccess(false);
+      }, 3000);
+
+    } catch (error) {
+      console.error(
+        "Request submit error:",
+        error
+      );
+
+      alert(
+        error.message ||
+        "Unable to send request."
+      );
+    } finally {
+      setRequestLoading(false);
+    }
   };
 
   return (
@@ -68,35 +134,51 @@ function StudentDashboard() {
       </div>
 
       <section className="stats-grid">
+
         <StatCard
           title="Current CGPA"
-          value="8.9"
+          value={
+            studentLoading
+              ? "..."
+              : student?.cgpa ?? "-"
+          }
           description="Overall academic performance"
-          trend="+0.2"
           icon={GraduationCap}
         />
 
         <StatCard
-          title="Semester"
-          value="4"
-          description="Current semester"
+          title="Year"
+          value={
+            studentLoading
+              ? "..."
+              : student?.year ?? "-"
+          }
+          description="Current academic year"
           icon={BookOpen}
         />
 
         <StatCard
           title="Attendance"
-          value="87%"
+          value={
+            studentLoading
+              ? "..."
+              : `${student?.attendance ?? 0}%`
+          }
           description="Overall attendance"
-          trend="+3%"
           icon={ClipboardList}
         />
 
         <StatCard
-          title="Requests"
-          value="2"
-          description="Active requests"
-          icon={ClipboardList}
+          title="Department"
+          value={
+            studentLoading
+              ? "..."
+              : student?.department ?? "-"
+          }
+          description="Current department"
+          icon={BookOpen}
         />
+
       </section>
 
       {/* SEND REQUEST */}
@@ -195,6 +277,7 @@ function StudentDashboard() {
             <button
               type="submit"
               className="primary-button"
+              disabled={requestLoading}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -202,7 +285,10 @@ function StudentDashboard() {
               }}
             >
               <Send size={15} />
-              Submit Request
+
+              {requestLoading
+                ? "Sending..."
+                : "Submit Request"}
             </button>
 
             {success && (

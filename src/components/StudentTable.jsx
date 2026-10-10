@@ -1,5 +1,5 @@
-import API_URL from "../config/api";
 import { useEffect, useState } from "react";
+import { apiFetch } from "../config/api";
 
 function StudentTable() {
   const [students, setStudents] = useState([]);
@@ -8,9 +8,7 @@ function StudentTable() {
   useEffect(() => {
     const loadStudents = async () => {
       try {
-        const response = await fetch(
-          `${API_URL}/api/students`
-        );
+        const response = await apiFetch("/api/students");
 
         if (!response.ok) {
           throw new Error("Failed to load students");
@@ -22,6 +20,8 @@ function StudentTable() {
         const data = Array.isArray(result)
           ? result
           : result.students || result.data || [];
+
+        console.log("Students API result:", data);
 
         setStudents(data);
       } catch (error) {
@@ -72,6 +72,7 @@ function StudentTable() {
                 <th>Department</th>
                 <th>Year</th>
                 <th>CGPA</th>
+                <th>ATTENDANCE</th>
                 <th>Status</th>
               </tr>
             </thead>
@@ -98,6 +99,8 @@ function StudentTable() {
                   <td>
                     <strong>{student.cgpa}</strong>
                   </td>
+
+                  <td>{student.attendance ?? 0}%</td>
 
                   <td>
                     <span className="status-badge">

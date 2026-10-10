@@ -1,4 +1,4 @@
-import API_URL from "../config/api";
+import { apiFetch } from "../config/api";
 import { useState } from "react";
 import {
     ArrowDownUp,
@@ -33,8 +33,8 @@ function Sorting() {
             setResult(null);
 
             const response =
-                await fetch(
-                    `${API_URL}/api/sort/${algorithm}`
+                await apiFetch(
+                    `/api/sort/${algorithm}`
                 );
 
             const data =
@@ -74,8 +74,8 @@ function Sorting() {
             setCompareResult(null);
 
             const response =
-                await fetch(
-                    `${API_URL}/api/sort/compare`
+                await apiFetch(
+                    `/api/sort/compare`
                 );
 
             const data =

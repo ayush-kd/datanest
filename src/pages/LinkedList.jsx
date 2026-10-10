@@ -1,4 +1,4 @@
-import API_URL from "../config/api";
+import { apiFetch } from "../config/api";
 import React, { useState } from "react";
 import {
     GitBranch,
@@ -31,12 +31,12 @@ function LinkedList() {
                     singlyResponse,
                     doublyResponse,
                 ] = await Promise.all([
-                    fetch(
-                        `${API_URL}/api/linked-list/test`
+                    apiFetch(
+                        `/api/linked-list/test`
                     ),
 
-                    fetch(
-                        `${API_URL}/api/doubly-linked-list/test`
+                    apiFetch(
+                        `/api/doubly-linked-list/test`
                     ),
                 ]);
 
